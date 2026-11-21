@@ -36,7 +36,11 @@ uv run python scripts/manifest_stats.py data/manifests/calitp/manifest.json
 uv run asklineage llm-check
 uv run uvicorn asklineage.main:app --reload
 curl -s localhost:8000/api/ask -H 'content-type: application/json' -d '{"node": "dim_schedule_feeds"}'
+curl -s localhost:8000/api/ask -H 'content-type: application/json' -d '{"question": "What depends on dim_schedule_feeds?", "start_thread": true}'
+uv run asklineage prune-threads --older-than-hours 24
 ```
+
+Stop `uvicorn --reload` before `uv add` or `uv sync`: the reloader watches `.venv`, restarts mid-install, and can leave port 8000 held by a dead worker, so requests hang instead of failing.
 
 ## Sample data
 
@@ -81,8 +85,8 @@ Phase 1 steps:
    - 5e `lineage --summarize [-v]` CLI — done. Redesigned to option B after three Cal-ITP runs; run 4 moved owners out of LLM text into code-added tags (ADR 0007 has the history and the A/B/C/D comparison); run 5: both directions grounded on the first attempt (highlights true but not yet well chosen; eval in Step 7)
 6. LangGraph flow and `/api/ask` (ADR 0008)
    - 6a done (158 tests; first Cal-ITP runs in ADR 0008): stateless graph (`api/flow.py`): `parse` (LLM reads the question; entity must appear in it as a whole name) or `read_fields` (structured, works with `LLM_PROVIDER=none`) → `resolve` → `lineage` → `answer`, with `abstain` and `clarify` branches; `POST /api/ask` returns `kind` = lineage | clarification | abstain, attempts tagged by stage
-   - 6b **next**: Postgres checkpointer; clarification as `interrupt()` + resume by `thread_id`; follow-up questions reuse the previous node; the stateless path stays
-7. Eval v1: about 30 golden lineage questions generated from the manifest, a runner, a results report
+   - 6b done (ADR 0009; tested on Cal-ITP: typo → resumable clarification → choose → follow-up): opt-in threads (`start_thread` → server-issued `thread_id`, `ask_threads` table, 404/409), `PostgresSaver` on a second autocommit pool (`init-db` runs `setup()`), `begin` clears turn-scoped keys, `clarify` uses `interrupt()` and `choose` resumes it (choice must be a candidate), follow-ups via `same_node` reuse `previous`, `durability="exit"`, explicit serializer allowlist `STATE_TYPES`, `prune-threads`; flow tests use `InMemorySaver` with the same serializer
+7. **Next:** Eval v1: about 30 golden lineage questions generated from the manifest, a runner, a results report
 8. README update: architecture, quickstart, sample data with the Cal-ITP commit hash, first results
 
 ## Evaluation approach
@@ -99,3 +103,4 @@ Evaluate each layer separately: classifier accuracy, name resolution, lineage se
 - `0006` Narrow LLM provider interface; OpenAI-compatible first; `none` by default
 - `0007` Code writes the lineage facts; the LLM adds checked relation highlights; generic retry loop
 - `0008` LangGraph orchestrates `/api/ask` (for 6b checkpoints and Phase 3 loops, and to learn it); plain functions would do for 6a
+- `0009` Conversation threads: opt-in, server-issued IDs, Postgres checkpoints, turn-scoped state reset, `interrupt()` clarifications, follow-ups, locks and pruning

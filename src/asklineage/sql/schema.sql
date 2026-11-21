@@ -63,3 +63,13 @@ CREATE TABLE IF NOT EXISTS data_tests (
 );
 
 CREATE INDEX IF NOT EXISTS data_tests_attached_idx ON data_tests (attached_node_id);
+
+-- /api/ask conversations. LangGraph's checkpoint tables hold each thread's state; this table
+-- says which threads exist and when they were last used, for 404s and pruning (ADR 0009).
+CREATE TABLE IF NOT EXISTS ask_threads (
+    thread_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    last_used_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ask_threads_last_used_idx ON ask_threads (last_used_at);

@@ -1,22 +1,28 @@
 from collections.abc import Iterator
+from uuid import uuid4
 
+import psycopg
 import pytest
+from ask_examples import FCT_ORDERS, HIGHLIGHTS, ORDERS, PARSE, RAW_ORDERS, STG_ORDERS
 from fastapi.testclient import TestClient
-from helpers import TEST_PROJECT, make_node
+from helpers import TEST_PROJECT
+from langgraph.checkpoint.memory import InMemorySaver
+from psycopg.rows import dict_row
 
-from asklineage.api.ask import get_conn, get_llm
+from asklineage.api.ask import get_conn, get_llm, get_thread_graph
+from asklineage.api.flow import build_graph, checkpoint_serde
+from asklineage.api.threads import create_thread, try_lock_thread
 from asklineage.llm.scripted import ScriptedProvider
 from asklineage.main import app
-
-STG_ORDERS = make_node("stg_orders", owner="finance")
-FCT_ORDERS = make_node("fct_orders", owner="finance")
 
 
 @pytest.fixture
 def client() -> Iterator[TestClient]:
-    # No database or LLM unless a test overrides these again.
+    # No database, LLM or Postgres checkpointer unless a test overrides these again.
+    threads = build_graph(checkpointer=InMemorySaver(serde=checkpoint_serde()))
     app.dependency_overrides[get_conn] = lambda: None
     app.dependency_overrides[get_llm] = lambda: None
+    app.dependency_overrides[get_thread_graph] = lambda: threads
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
@@ -24,9 +30,18 @@ def client() -> Iterator[TestClient]:
 
 @pytest.fixture
 def db_client(client, conn, load_graph) -> TestClient:
-    load_graph([STG_ORDERS, FCT_ORDERS], [(STG_ORDERS.unique_id, FCT_ORDERS.unique_id)])
+    load_graph(
+        [STG_ORDERS, FCT_ORDERS, ORDERS, RAW_ORDERS],
+        [(STG_ORDERS.unique_id, FCT_ORDERS.unique_id)],
+    )
     app.dependency_overrides[get_conn] = lambda: conn
     return client
+
+
+def post(client, **body) -> dict:
+    response = client.post("/api/ask", json=body)
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 @pytest.mark.parametrize(
@@ -38,6 +53,10 @@ def db_client(client, conn, load_graph) -> TestClient:
         {"node": "stg_orders", "direction": "sideways"},
         {"question": "x" * 501},
         {"node": "stg_orders", "colour": "blue"},
+        {"choose": "model.x.y"},
+        {"choose": "model.x.y", "thread_id": str(uuid4()), "node": "stg_orders"},
+        {"node": "stg_orders", "start_thread": True, "thread_id": str(uuid4())},
+        {"node": "stg_orders", "thread_id": "not-a-uuid"},
     ],
 )
 def test_bad_requests_are_rejected(client, body):
@@ -45,17 +64,15 @@ def test_bad_requests_are_rejected(client, body):
 
 
 def test_free_text_without_an_llm_abstains(client):
-    response = client.post("/api/ask", json={"question": "what depends on stg_orders?"})
+    data = post(client, question="what depends on stg_orders?")
 
-    assert response.status_code == 200
-    assert response.json()["kind"] == "abstain"
-    assert response.json()["reason"] == "llm_off"
+    assert data["kind"] == "abstain"
+    assert data["reason"] == "llm_off"
+    assert data["thread_id"] is None
 
 
 def test_structured_request_returns_the_lineage_contract(db_client):
-    body = {"node": "stg_orders", "project": TEST_PROJECT}
-
-    data = db_client.post("/api/ask", json=body).json()
+    data = post(db_client, node="stg_orders", project=TEST_PROJECT)
 
     assert data["kind"] == "lineage"
     assert data["node"]["unique_id"] == STG_ORDERS.unique_id
@@ -75,21 +92,9 @@ def test_structured_request_returns_the_lineage_contract(db_client):
 
 
 def test_free_text_with_an_llm_returns_attempts_by_stage(db_client):
-    parse = {"is_lineage": True, "entity": "stg_orders", "direction": "downstream", "depth": None}
-    highlights = {
-        "claims": [
-            {
-                "upstream": "stg_orders",
-                "downstream": "fct_orders",
-                "hops": "direct",
-                "text": "`fct_orders` reads directly from `stg_orders`.",
-            }
-        ]
-    }
-    app.dependency_overrides[get_llm] = lambda: ScriptedProvider([parse, highlights])
-    body = {"question": "What depends on stg_orders?", "project": TEST_PROJECT}
+    app.dependency_overrides[get_llm] = lambda: ScriptedProvider([PARSE, HIGHLIGHTS])
 
-    data = db_client.post("/api/ask", json=body).json()
+    data = post(db_client, question="What depends on stg_orders?", project=TEST_PROJECT)
 
     assert data["kind"] == "lineage"
     assert data["highlights"][0]["text"].startswith("`fct_orders` (finance)")
@@ -98,10 +103,43 @@ def test_free_text_with_an_llm_returns_attempts_by_stage(db_client):
 
 
 def test_unknown_node_returns_a_clarification(db_client):
-    body = {"node": "stg_ordrs", "project": TEST_PROJECT}
-
-    data = db_client.post("/api/ask", json=body).json()
+    data = post(db_client, node="stg_ordrs", project=TEST_PROJECT)
 
     assert data["kind"] == "clarification"
     assert data["reason"] == "not_found"
+    assert data["resumable"] is False
     assert data["candidates"][0]["unique_id"] == STG_ORDERS.unique_id
+
+
+def test_a_thread_clarifies_then_answers_the_choice(db_client):
+    asked = post(db_client, node="orders", project=TEST_PROJECT, start_thread=True)
+    thread_id = asked["thread_id"]
+
+    chosen = post(db_client, thread_id=thread_id, choose=ORDERS.unique_id)
+
+    assert (asked["kind"], asked["resumable"]) == ("clarification", True)
+    assert chosen["kind"] == "lineage"
+    assert chosen["node"]["unique_id"] == ORDERS.unique_id
+    assert chosen["thread_id"] == thread_id
+
+
+def test_an_unknown_thread_is_not_found(db_client):
+    body = {"thread_id": str(uuid4()), "node": "stg_orders"}
+
+    assert db_client.post("/api/ask", json=body).status_code == 404
+
+
+def test_choose_on_a_thread_that_is_not_waiting_is_a_conflict(db_client):
+    started = post(db_client, node="stg_orders", project=TEST_PROJECT, start_thread=True)
+    body = {"thread_id": started["thread_id"], "choose": STG_ORDERS.unique_id}
+
+    assert db_client.post("/api/ask", json=body).status_code == 409
+
+
+def test_a_busy_thread_is_a_conflict(db_client, conn, database_url):
+    thread_id = create_thread(conn)
+    body = {"thread_id": str(thread_id), "node": "stg_orders", "project": TEST_PROJECT}
+
+    with psycopg.connect(database_url, row_factory=dict_row) as other:
+        assert try_lock_thread(other, thread_id)
+        assert db_client.post("/api/ask", json=body).status_code == 409

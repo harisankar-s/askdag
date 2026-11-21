@@ -1,6 +1,7 @@
 """The /api/ask contract: one request shape, and three kinds of answer told apart by `kind`."""
 
 from typing import Annotated, Literal, Self
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -13,7 +14,11 @@ from asklineage.lineage.resolve import Candidate
 
 
 class AskRequest(BaseModel):
-    """A free-text question (needs an LLM), or a node with optional direction and depth."""
+    """A free-text question (needs an LLM), or a node with optional direction and depth.
+
+    Stateless by default. start_thread opens a conversation; thread_id continues one; choose
+    (with thread_id, on its own) answers the thread's pending clarification with a unique_id.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -22,9 +27,21 @@ class AskRequest(BaseModel):
     direction: Direction | None = None
     depth: int | None = Field(default=None, ge=1, le=MAX_DEPTH)
     project: str | None = None
+    start_thread: bool = False
+    thread_id: UUID | None = None
+    choose: str | None = Field(default=None, min_length=1, max_length=300)
 
     @model_validator(mode="after")
     def question_or_node(self) -> Self:
+        if self.start_thread and self.thread_id is not None:
+            raise ValueError("pass start_thread or thread_id, not both")
+        if self.choose is not None:
+            if self.thread_id is None:
+                raise ValueError("choose answers a thread's clarification; pass its thread_id")
+            asked = (self.question, self.node, self.direction, self.depth, self.project)
+            if any(field is not None for field in asked):
+                raise ValueError("choose is sent with thread_id only")
+            return self
         if self.node is None:
             if self.question is None:
                 raise ValueError("pass a question, or a node with optional direction and depth")
@@ -156,15 +173,19 @@ class LineageResponse(BaseModel):
     highlight_status: HighlightStatus
     table: list[NodeRow]
     attempts: list[AttemptInfo] = []
+    thread_id: UUID | None = None
 
 
 class ClarificationResponse(BaseModel):
     kind: Literal["clarification"] = "clarification"
-    reason: Literal["ambiguous", "not_found"]
+    reason: Literal["ambiguous", "not_found", "invalid_choice"]
     query: str
     message: str
     candidates: list[CandidateInfo]  # exact matches when ambiguous; suggestions when not found
+    # True when the thread is waiting for `choose`; otherwise ask again.
+    resumable: bool = False
     attempts: list[AttemptInfo] = []
+    thread_id: UUID | None = None
 
 
 AbstainReason = Literal["not_lineage", "not_understood", "llm_off", "llm_unavailable"]
@@ -175,6 +196,7 @@ class AbstainResponse(BaseModel):
     reason: AbstainReason
     message: str
     attempts: list[AttemptInfo] = []
+    thread_id: UUID | None = None
 
 
 AskResponse = Annotated[

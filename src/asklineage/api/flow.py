@@ -1,23 +1,29 @@
-"""The /api/ask flow as a LangGraph graph (ADR 0008).
+"""The /api/ask flow as a LangGraph graph (ADR 0008, 0009).
 
-START ─┬─ read_fields ─────┬─ resolve ─┬─ lineage ─ answer
-       └─ parse ─┬────────┘           └─ clarify
-                 └─ abstain
+START ─ begin ─┬─ read_fields ─────┬─ resolve ─┬─ lineage ─ answer
+               └─ parse ─┬────────┘           └─ clarify ─┬─ lineage
+                         ├─ lineage (follow-up)            └─ END
+                         └─ abstain
 
 Nodes are thin wrappers over the pure functions; the connection and provider come through the
-runtime context, not the state, so the state stays serializable for a checkpointer.
+runtime context, not the state, so the state can be checkpointed. One builder compiles twice:
+without a checkpointer (stateless, the default) and with one (conversation threads).
 """
 
-import operator
 from dataclasses import dataclass
 from typing import Annotated, Literal, TypedDict
+from uuid import UUID
 
 import psycopg
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
+from langgraph.types import Command, interrupt
 
-from asklineage.answer.lineage_answer import answer_lineage
-from asklineage.answer.parse import clean_entity, parse_question
+from asklineage.answer.lineage_answer import HighlightStatus, answer_lineage
+from asklineage.answer.parse import PreviousQuestion, clean_entity, parse_question
 from asklineage.api.models import (
     AbstainReason,
     AbstainResponse,
@@ -31,8 +37,9 @@ from asklineage.api.models import (
     LineageResponse,
     NodeInfo,
     NodeRow,
+    OwnerInfo,
 )
-from asklineage.lineage.graph import DEFAULT_DEPTH, Direction, Lineage, lineage
+from asklineage.lineage.graph import DEFAULT_DEPTH, Direction, Lineage, LineageNode, lineage
 from asklineage.lineage.resolve import (
     Ambiguous,
     Candidate,
@@ -43,7 +50,7 @@ from asklineage.lineage.resolve import (
 )
 from asklineage.llm.base import LLMProvider
 
-# The longest run is 4 steps; a run that needs more is a bug, not a slow question.
+# The longest run is 5 steps; a run that needs more is a bug, not a slow question.
 RECURSION_LIMIT = 10
 
 ABSTAIN_MESSAGES: dict[str, str] = {
@@ -71,6 +78,7 @@ class AskContext:
     conn: psycopg.Connection
     provider: LLMProvider | None
     max_named: int
+    resumable: bool = False  # true only on a checkpointed thread, where interrupt() can work
 
 
 @dataclass(frozen=True)
@@ -80,16 +88,77 @@ class LineageQuery:
     depth: int
 
 
-class AskState(TypedDict, total=False):
-    request: AskRequest
-    query: LineageQuery
-    abstain_reason: AbstainReason
+@dataclass(frozen=True)
+class Remembered:
     root: Candidate
-    unresolved: Ambiguous | NotFound
-    result: Lineage
-    response: AskResponse
-    # Each node returns only its own attempts; the reducer appends them in order.
-    attempts: Annotated[list[AttemptInfo], operator.add]
+    direction: Direction
+    depth: int
+
+
+def add_attempts(
+    current: list[AttemptInfo] | None, update: list[AttemptInfo] | None
+) -> list[AttemptInfo]:
+    """Append each node's attempts; None (from begin) starts a new turn's list."""
+    if update is None:
+        return []
+    return [*(current or []), *update]
+
+
+class AskState(TypedDict, total=False):
+    # Turn-scoped: begin clears these, because a thread's checkpoint carries every key into
+    # the next question, and a stale abstain_reason or root would route the new one wrongly.
+    request: AskRequest
+    query: LineageQuery | None
+    abstain_reason: AbstainReason | None
+    root: Candidate | None
+    unresolved: Ambiguous | NotFound | None
+    result: Lineage | None
+    response: AskResponse | None
+    attempts: Annotated[list[AttemptInfo], add_attempts]
+    # Thread-scoped: what the last answer was about, for follow-up questions.
+    previous: Remembered | None
+
+
+# Every type stored in the state, so checkpoints deserialise them without LangGraph's
+# "unregistered type" path, which a future version will block.
+STATE_TYPES: tuple[type, ...] = (
+    AskRequest,
+    LineageQuery,
+    Remembered,
+    Candidate,
+    Ambiguous,
+    NotFound,
+    Lineage,
+    LineageNode,
+    Direction,
+    HighlightStatus,
+    AttemptInfo,
+    LineageResponse,
+    ClarificationResponse,
+    AbstainResponse,
+    NodeInfo,
+    CandidateInfo,
+    NodeRow,
+    FactsInfo,
+    OwnerInfo,
+    HighlightInfo,
+)
+
+
+def checkpoint_serde() -> JsonPlusSerializer:
+    return JsonPlusSerializer(allowed_msgpack_modules=STATE_TYPES)
+
+
+def begin(state: AskState) -> AskState:
+    return {
+        "query": None,
+        "abstain_reason": None,
+        "root": None,
+        "unresolved": None,
+        "result": None,
+        "response": None,
+        "attempts": None,
+    }
 
 
 def route_input(state: AskState) -> Literal["read_fields", "parse"]:
@@ -107,7 +176,13 @@ def parse(state: AskState, runtime: Runtime[AskContext]) -> AskState:
     provider = runtime.context.provider
     if provider is None:
         return {"abstain_reason": "llm_off"}
-    generated = parse_question(provider, state["request"].question)
+    previous = state.get("previous")
+    asked_before = (
+        PreviousQuestion(previous.root.display_name, previous.direction, previous.depth)
+        if previous
+        else None
+    )
+    generated = parse_question(provider, state["request"].question, asked_before)
     attempts = [AttemptInfo.from_attempt("parse", a) for a in generated.attempts]
     parsed = generated.output
     if parsed is None:
@@ -115,14 +190,21 @@ def parse(state: AskState, runtime: Runtime[AskContext]) -> AskState:
         return {"abstain_reason": reason, "attempts": attempts}
     if not parsed.is_lineage:
         return {"abstain_reason": "not_lineage", "attempts": attempts}
-    query = LineageQuery(
-        clean_entity(parsed.entity), parsed.direction, parsed.depth or DEFAULT_DEPTH
-    )
+
+    # The check guarantees a direction, or a previous question to keep one from.
+    direction = parsed.direction or previous.direction
+    depth = parsed.depth or (previous.depth if previous else DEFAULT_DEPTH)
+    if parsed.same_node:
+        query = LineageQuery(previous.root.display_name, direction, depth)
+        return {"query": query, "root": previous.root, "attempts": attempts}
+    query = LineageQuery(clean_entity(parsed.entity), direction, depth)
     return {"query": query, "attempts": attempts}
 
 
-def after_parse(state: AskState) -> Literal["abstain", "resolve"]:
-    return "abstain" if "abstain_reason" in state else "resolve"
+def after_parse(state: AskState) -> Literal["abstain", "lineage", "resolve"]:
+    if state.get("abstain_reason"):
+        return "abstain"
+    return "lineage" if state.get("root") else "resolve"
 
 
 def abstain(state: AskState) -> AskState:
@@ -138,28 +220,60 @@ def resolve(state: AskState, runtime: Runtime[AskContext]) -> AskState:
 
 
 def after_resolve(state: AskState) -> Literal["lineage", "clarify"]:
-    return "lineage" if "root" in state else "clarify"
+    return "lineage" if state.get("root") else "clarify"
 
 
-def clarify(state: AskState) -> AskState:
-    match state["unresolved"]:
-        case Ambiguous(query=query, candidates=candidates):
-            reason = "ambiguous"
-            message = (
-                f"{query!r} matches {len(candidates)} nodes. "
-                "Ask again with one of these unique_ids as node."
-            )
-        case NotFound(query=query, suggestions=candidates):
-            reason = "not_found"
-            hint = "Did you mean one of these?" if candidates else "Check the name in dbt."
-            message = f"No node named {query!r}. {hint}"
-    response = ClarificationResponse(
+def candidates_of(unresolved: Ambiguous | NotFound) -> list[Candidate]:
+    if isinstance(unresolved, Ambiguous):
+        return list(unresolved.candidates)
+    return list(unresolved.suggestions)
+
+
+def clarification(unresolved: Ambiguous | NotFound, resumable: bool) -> ClarificationResponse:
+    candidates = candidates_of(unresolved)
+    query = unresolved.query
+    if isinstance(unresolved, Ambiguous):
+        reason, message = "ambiguous", f"{query!r} matches {len(candidates)} nodes."
+    else:
+        reason, message = "not_found", f"No node named {query!r}."
+        if not candidates:
+            message += " Check the name in dbt."
+    if candidates:
+        how = "send choose with" if resumable else "ask again with node set to"
+        message += f" To use one of these, {how} its unique_id."
+    return ClarificationResponse(
         reason=reason,
         query=query,
         message=message,
         candidates=[CandidateInfo.from_candidate(c) for c in candidates],
+        resumable=resumable and bool(candidates),
     )
-    return {"response": response}
+
+
+def clarify(state: AskState, runtime: Runtime[AskContext]) -> AskState:
+    # On resume this node runs again from the top, so nothing before interrupt() may have
+    # side effects.
+    unresolved = state["unresolved"]
+    response = clarification(unresolved, runtime.context.resumable)
+    if not response.resumable:
+        return {"response": response}
+    choice = interrupt(response.model_dump(mode="json"))
+
+    picked = next((c for c in candidates_of(unresolved) if c.unique_id == choice), None)
+    if picked is None:
+        rejected = response.model_copy(
+            update={
+                "reason": "invalid_choice",
+                "message": f"{choice!r} was not one of the candidates. Ask the question again.",
+                "resumable": False,
+            }
+        )
+        return {"response": rejected}
+    return {"root": picked}
+
+
+def after_clarify(state: AskState) -> Literal["lineage", "__end__"]:
+    return "lineage" if state.get("root") else END
 
 
 def walk(state: AskState, runtime: Runtime[AskContext]) -> AskState:
@@ -190,11 +304,18 @@ def answer(state: AskState, runtime: Runtime[AskContext]) -> AskState:
         table=[NodeRow.from_node(node) for node in lineage_answer.lineage.nodes],
     )
     attempts = [AttemptInfo.from_attempt("highlights", a) for a in lineage_answer.attempts]
-    return {"response": response, "attempts": attempts}
+    return {
+        "response": response,
+        "attempts": attempts,
+        "previous": Remembered(root, query.direction, query.depth),
+        # The response already holds the table; don't checkpoint the whole walk as well.
+        "result": None,
+    }
 
 
-def build_graph():
+def build_graph(checkpointer: BaseCheckpointSaver | None = None) -> CompiledStateGraph:
     graph = StateGraph(AskState, context_schema=AskContext)
+    graph.add_node("begin", begin)
     graph.add_node("read_fields", read_fields)
     graph.add_node("parse", parse)
     graph.add_node("abstain", abstain)
@@ -203,17 +324,27 @@ def build_graph():
     graph.add_node("lineage", walk)
     graph.add_node("answer", answer)
 
-    graph.add_conditional_edges(START, route_input, ["read_fields", "parse"])
+    graph.add_edge(START, "begin")
+    graph.add_conditional_edges("begin", route_input, ["read_fields", "parse"])
     graph.add_edge("read_fields", "resolve")
-    graph.add_conditional_edges("parse", after_parse, ["abstain", "resolve"])
+    graph.add_conditional_edges("parse", after_parse, ["abstain", "lineage", "resolve"])
     graph.add_conditional_edges("resolve", after_resolve, ["lineage", "clarify"])
+    graph.add_conditional_edges("clarify", after_clarify, ["lineage", END])
     graph.add_edge("lineage", "answer")
-    for last in ("abstain", "clarify", "answer"):
+    for last in ("abstain", "answer"):
         graph.add_edge(last, END)
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 ASK_GRAPH = build_graph()
+
+
+def thread_config(thread_id: UUID) -> dict:
+    return {"configurable": {"thread_id": str(thread_id)}, "recursion_limit": RECURSION_LIMIT}
+
+
+def waiting_for_choice(graph: CompiledStateGraph, thread_id: UUID) -> bool:
+    return bool(graph.get_state(thread_config(thread_id)).interrupts)
 
 
 def run_ask(
@@ -222,10 +353,26 @@ def run_ask(
     request: AskRequest,
     *,
     max_named: int,
+    graph: CompiledStateGraph = ASK_GRAPH,
+    thread_id: UUID | None = None,
 ) -> AskResponse:
-    final = ASK_GRAPH.invoke(
-        {"request": request},
-        context=AskContext(conn, provider, max_named),
-        config={"recursion_limit": RECURSION_LIMIT},
+    """Stateless unless thread_id is given, in which case graph must have a checkpointer."""
+    context = AskContext(conn, provider, max_named, resumable=thread_id is not None)
+    if thread_id is None:
+        final = graph.invoke(
+            {"request": request}, context=context, config={"recursion_limit": RECURSION_LIMIT}
+        )
+        response = final["response"]
+    else:
+        config = thread_config(thread_id)
+        graph_input = Command(resume=request.choose) if request.choose else {"request": request}
+        # "exit": one checkpoint per turn (or at the interrupt), not one per step.
+        final = graph.invoke(graph_input, context=context, config=config, durability="exit")
+        interrupts = graph.get_state(config).interrupts
+        if interrupts:
+            response = ClarificationResponse.model_validate(interrupts[0].value)
+        else:
+            response = final["response"]
+    return response.model_copy(
+        update={"attempts": final.get("attempts") or [], "thread_id": thread_id}
     )
-    return final["response"].model_copy(update={"attempts": final.get("attempts", [])})

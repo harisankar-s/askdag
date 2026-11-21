@@ -3,6 +3,8 @@ import pytest
 from asklineage.answer.parse import (
     EXAMPLES,
     ParsedQuestion,
+    PreviousQuestion,
+    build_prompt,
     check_parse,
     clean_entity,
     entity_in_question,
@@ -12,10 +14,23 @@ from asklineage.lineage.graph import Direction
 from asklineage.llm.scripted import ScriptedProvider
 
 QUESTION = "What breaks downstream if I change stg_orders?"
+PREVIOUS = PreviousQuestion("stg_orders", Direction.DOWNSTREAM, 3)
 
 
-def parsed(entity="stg_orders", direction=Direction.DOWNSTREAM, depth=None, is_lineage=True):
-    return ParsedQuestion(is_lineage=is_lineage, entity=entity, direction=direction, depth=depth)
+def parsed(
+    entity="stg_orders",
+    direction=Direction.DOWNSTREAM,
+    depth=None,
+    is_lineage=True,
+    same_node=False,
+):
+    return ParsedQuestion(
+        is_lineage=is_lineage,
+        same_node=same_node,
+        entity=entity,
+        direction=direction,
+        depth=depth,
+    )
 
 
 def rules(violations) -> list[str]:
@@ -26,9 +41,47 @@ def test_a_name_copied_from_the_question_passes():
     assert check_parse(parsed(), QUESTION) == []
 
 
-@pytest.mark.parametrize("question, example", EXAMPLES)
-def test_every_prompt_example_passes_its_own_check(question, example):
-    assert check_parse(example, question) == []
+@pytest.mark.parametrize("question, previous, example", EXAMPLES)
+def test_every_prompt_example_passes_its_own_check(question, previous, example):
+    assert check_parse(example, question, previous) == []
+
+
+def test_a_follow_up_about_the_previous_node_passes():
+    follow_up = parsed(entity=None, direction=Direction.UPSTREAM, same_node=True)
+
+    assert check_parse(follow_up, "And upstream?", PREVIOUS) == []
+
+
+def test_a_follow_up_needs_a_previous_question():
+    follow_up = parsed(entity=None, direction=Direction.UPSTREAM, same_node=True)
+
+    assert rules(check_parse(follow_up, "And upstream?")) == ["no_previous_node"]
+
+
+def test_a_follow_up_may_not_switch_to_another_node():
+    follow_up = parsed(entity="fct_orders", same_node=True)
+
+    assert rules(check_parse(follow_up, "And upstream?", PREVIOUS)) == ["same_node_entity"]
+
+
+def test_a_new_node_in_a_follow_up_must_still_be_in_the_question():
+    reply = parsed(entity="fct_orders", direction=None)
+
+    assert rules(check_parse(reply, "What about mart_weekly?", PREVIOUS)) == [
+        "entity_not_in_question"
+    ]
+
+
+def test_direction_may_be_left_to_the_previous_question():
+    reply = parsed(entity="fct_orders", direction=None)
+
+    assert check_parse(reply, "What about fct_orders?", PREVIOUS) == []
+    assert rules(check_parse(reply, "What about fct_orders?")) == ["missing_direction"]
+
+
+def test_the_prompt_says_whether_there_is_a_previous_question():
+    assert "There is no previous question" in build_prompt(QUESTION)
+    assert "`stg_orders` (downstream, 3 hops)" in build_prompt("And upstream?", PREVIOUS)
 
 
 def test_a_name_not_in_the_question_is_rejected():

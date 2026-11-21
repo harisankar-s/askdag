@@ -60,6 +60,13 @@ Same functions, same tests, no dependency. Moving between the two is a change to
 | Pause and resume (6b) | build it: a sessions table, serialised state, resume logic | `interrupt()` plus a Postgres checkpointer |
 | Loops (Phase 3) | hand-written, with its own bound | graph cycles, bounded by our counters and `recursion_limit` |
 
+## Update after 6b (ADR 0009)
+6b added a `begin` node (it clears the turn's keys, because a checkpoint carries them into the next question) and edges `parse → lineage` (follow-ups) and `clarify → lineage` (a resumed choice). What the checkpointer cost in our code:
+- `langgraph-checkpoint-postgres` and its tables, a second pool with different connection settings, and `saver.setup()` in `init-db`.
+- An explicit serializer allowlist of 20 state types, because LangGraph's default lets unregistered types through with a warning and says it will block them.
+- Reasoning about `interrupt()`: the node runs again from its first line on resume, so nothing before the call may have side effects.
+- A rule for every state key: turn-scoped (cleared by `begin`) or thread-scoped (`previous`).
+
 ## Consequences
 - The state must stay serializable: no connections, clients or providers in it.
 - `langsmith` (LangChain's tracing client) is installed but sends nothing unless `LANGSMITH_TRACING` and an API key are set. Deployments should leave them unset, or set them deliberately; tracing would send questions and answers to a third party. Tracing in this repo is OpenTelemetry (Phase 6). It also registers a pytest plugin (`plugins: langsmith-0.16.0` in every test run), inactive without those settings.

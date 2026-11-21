@@ -4,15 +4,19 @@ import argparse
 import json
 import textwrap
 from collections import Counter
+from datetime import timedelta
 from pathlib import Path
 
 import psycopg
+from langgraph.checkpoint.postgres import PostgresSaver
 from psycopg.rows import dict_row
 from pydantic import BaseModel
 
 from asklineage.answer.claims import Highlights
 from asklineage.answer.generate import Attempt
 from asklineage.answer.lineage_answer import HighlightStatus, LineageAnswer, answer_lineage
+from asklineage.api.flow import checkpoint_serde
+from asklineage.api.threads import prune_threads
 from asklineage.config import get_settings
 from asklineage.ingest.load import apply_schema, load_manifest
 from asklineage.ingest.manifest import UnsupportedManifestError, parse_manifest
@@ -51,6 +55,8 @@ def main(argv: list[str] | None = None) -> None:
         "-v", "--verbose", action="store_true", help="with --summarize, show each LLM attempt"
     )
     commands.add_parser("llm-check", help="Send one small request to the configured LLM")
+    prune = commands.add_parser("prune-threads", help="Delete /api/ask threads unused for a while")
+    prune.add_argument("--older-than-hours", type=float, default=24.0)
     args = parser.parse_args(argv)
     if args.command == "lineage" and not 1 <= args.depth <= MAX_DEPTH:
         parser.error(f"--depth must be between 1 and {MAX_DEPTH}")
@@ -58,10 +64,20 @@ def main(argv: list[str] | None = None) -> None:
         _check_llm()
         return
 
-    with psycopg.connect(get_settings().database_url, row_factory=dict_row) as conn:
+    url = get_settings().database_url
+    with (
+        psycopg.connect(url, row_factory=dict_row) as conn,
+        # LangGraph's saver needs autocommit (its migrations create indexes concurrently).
+        psycopg.connect(url, autocommit=True, prepare_threshold=0, row_factory=dict_row) as raw,
+    ):
         apply_schema(conn)
+        saver = PostgresSaver(raw, serde=checkpoint_serde())
         if args.command == "init-db":
-            print("Schema is up to date.")
+            saver.setup()
+            print("Schema is up to date, including LangGraph's checkpoint tables.")
+        elif args.command == "prune-threads":
+            pruned = prune_threads(conn, saver, timedelta(hours=args.older_than_hours))
+            print(f"Pruned {pruned} thread(s) unused for {args.older_than_hours:g} hours or more.")
         elif args.command == "lineage":
             _show_lineage(conn, args)
         else:

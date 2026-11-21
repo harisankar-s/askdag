@@ -1,5 +1,16 @@
 import pytest
-from helpers import TEST_PROJECT, make_node
+from ask_examples import (
+    EDGES,
+    HIGHLIGHTS,
+    NODES,
+    NOT_LINEAGE,
+    ORDERS,
+    PARSE,
+    QUESTION,
+    RAW_ORDERS,
+    STG_ORDERS,
+)
+from helpers import TEST_PROJECT
 
 from asklineage.answer.lineage_answer import HighlightStatus
 from asklineage.api.flow import run_ask
@@ -13,36 +24,10 @@ from asklineage.lineage.graph import Direction
 from asklineage.llm.base import LLMError
 from asklineage.llm.scripted import ScriptedProvider
 
-RAW_ORDERS = make_node("orders", "source", source_name="raw")
-ORDERS = make_node("orders")
-STG_ORDERS = make_node("stg_orders", owner="finance")
-FCT_ORDERS = make_node("fct_orders", owner="finance")
-MART_WEEKLY = make_node("mart_weekly")
-
-QUESTION = "What breaks if I change stg_orders?"
-PARSE = {"is_lineage": True, "entity": "stg_orders", "direction": "downstream", "depth": None}
-HIGHLIGHTS = {
-    "claims": [
-        {
-            "upstream": "stg_orders",
-            "downstream": "fct_orders",
-            "hops": "direct",
-            "text": "`fct_orders` reads directly from `stg_orders`.",
-        }
-    ]
-}
-
 
 @pytest.fixture(autouse=True)
 def graph(load_graph) -> None:
-    load_graph(
-        [RAW_ORDERS, ORDERS, STG_ORDERS, FCT_ORDERS, MART_WEEKLY],
-        [
-            (RAW_ORDERS.unique_id, STG_ORDERS.unique_id),
-            (STG_ORDERS.unique_id, FCT_ORDERS.unique_id),
-            (FCT_ORDERS.unique_id, MART_WEEKLY.unique_id),
-        ],
-    )
+    load_graph(NODES, EDGES)
 
 
 def ask(conn, provider=None, **fields):
@@ -97,9 +82,7 @@ def test_parsed_direction_and_depth_are_used(conn):
 
 
 def test_a_question_that_is_not_lineage_abstains(conn):
-    provider = ScriptedProvider(
-        [{"is_lineage": False, "entity": None, "direction": None, "depth": None}]
-    )
+    provider = ScriptedProvider([NOT_LINEAGE])
 
     response = ask(conn, provider, question="Who owns fct_orders?")
 
