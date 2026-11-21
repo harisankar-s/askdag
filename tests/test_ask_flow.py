@@ -99,11 +99,34 @@ def test_free_text_without_an_llm_abstains(conn):
 
 
 def test_a_question_that_fails_the_check_twice_abstains(conn):
-    guessed = {**PARSE, "entity": "fct_orders"}
-    response = ask(conn, ScriptedProvider([guessed, guessed]), question=QUESTION)
+    guessed = {**PARSE, "entity": "mart_weekly"}
+    question = "Does stg_orders feed fct_orders?"  # two names: nothing to recover
+    response = ask(conn, ScriptedProvider([guessed, guessed]), question=question)
 
     assert isinstance(response, AbstainResponse)
     assert response.reason == "not_understood"
+    assert stages(response) == ["parse", "parse"]
+
+
+def test_a_name_the_model_changed_is_taken_from_the_question(conn):
+    guessed = {**PARSE, "entity": "fct_orders"}
+    provider = ScriptedProvider([guessed, guessed, LLMError("down")])
+
+    response = ask(conn, provider, question=QUESTION)
+
+    assert isinstance(response, LineageResponse)
+    assert response.node.unique_id == STG_ORDERS.unique_id
+
+
+def test_a_typo_the_model_corrected_still_gets_suggestions(conn):
+    corrected = {**PARSE, "entity": "stg_orders"}
+    provider = ScriptedProvider([corrected, corrected])
+
+    response = ask(conn, provider, question="What depends on stg_ordrs?")
+
+    assert isinstance(response, ClarificationResponse)
+    assert (response.reason, response.query) == ("not_found", "stg_ordrs")
+    assert response.candidates[0].unique_id == STG_ORDERS.unique_id
     assert stages(response) == ["parse", "parse"]
 
 

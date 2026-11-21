@@ -93,6 +93,14 @@ def resolve_node(conn: psycopg.Connection, query: str, project: str | None = Non
         return NotFound(q, tuple(Candidate(**row) for row in cur.fetchall()))
 
 
+def node_names(conn: psycopg.Connection, project: str | None = None) -> frozenset[str]:
+    """Every node's name and display name, lower-cased, to spot a node named in a question."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(DISPLAY_NAMES, {"project": project})
+        displays = {row["name"].lower() for row in cur.fetchall()}
+    return frozenset(displays | {display.rsplit(".", 1)[-1] for display in displays})
+
+
 def node_display_names(conn: psycopg.Connection, project: str | None = None) -> frozenset[str]:
     """Every node's display name, so a summary that mentions a real node unmarked can be caught."""
     with conn.cursor(row_factory=dict_row) as cur:

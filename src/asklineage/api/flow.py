@@ -23,7 +23,12 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command, interrupt
 
 from asklineage.answer.lineage_answer import HighlightStatus, answer_lineage
-from asklineage.answer.parse import PreviousQuestion, clean_entity, parse_question
+from asklineage.answer.parse import (
+    PreviousQuestion,
+    clean_entity,
+    parse_question,
+    recover_reading,
+)
 from asklineage.api.models import (
     AbstainReason,
     AbstainResponse,
@@ -46,6 +51,7 @@ from asklineage.lineage.resolve import (
     NotFound,
     Resolved,
     node_display_names,
+    node_names,
     resolve_node,
 )
 from asklineage.llm.base import LLMProvider
@@ -182,9 +188,12 @@ def parse(state: AskState, runtime: Runtime[AskContext]) -> AskState:
         if previous
         else None
     )
-    generated = parse_question(provider, state["request"].question, asked_before)
+    question = state["request"].question
+    # Only a follow-up can claim the previous node, so only then are node names needed.
+    known = node_names(runtime.context.conn, state["request"].project) if previous else frozenset()
+    generated = parse_question(provider, question, asked_before, known)
     attempts = [AttemptInfo.from_attempt("parse", a) for a in generated.attempts]
-    parsed = generated.output
+    parsed = generated.output or recover_reading(generated, question)
     if parsed is None:
         reason = "llm_unavailable" if generated.attempts[-1].error else "not_understood"
         return {"abstain_reason": reason, "attempts": attempts}

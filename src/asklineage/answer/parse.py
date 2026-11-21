@@ -15,6 +15,8 @@ from asklineage.lineage.graph import MAX_DEPTH, Direction
 from asklineage.llm.base import LLMProvider
 
 MAX_QUESTION_CHARS = 500
+BACKTICKED = re.compile(r"`([^`]+)`")
+NAME_LIKE = re.compile(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*")
 
 
 class ParsedQuestion(BaseModel):
@@ -128,9 +130,30 @@ def entity_in_question(entity: str, question: str) -> bool:
     return re.search(pattern, _collapse(question), re.IGNORECASE) is not None
 
 
+def name_tokens(question: str) -> list[str]:
+    """Names written the way dbt names nodes: backticked, or with an underscore or a dot."""
+    found = [clean_entity(token) for token in BACKTICKED.findall(question)]
+    bare = BACKTICKED.sub(" ", question)
+    found += [token for token in NAME_LIKE.findall(bare) if "_" in token or "." in token]
+    return list(dict.fromkeys(token for token in found if token))
+
+
+def _other_node_named(
+    question: str, previous: PreviousQuestion, known_names: frozenset[str]
+) -> str | None:
+    before = previous.node.lower()
+    named = (t for t in name_tokens(question) if t.lower() in known_names and t.lower() != before)
+    return next(named, None)
+
+
 def check_parse(
-    parsed: ParsedQuestion, question: str, previous: PreviousQuestion | None = None
+    parsed: ParsedQuestion,
+    question: str,
+    previous: PreviousQuestion | None = None,
+    known_names: frozenset[str] = frozenset(),
 ) -> list[Violation]:
+    """known_names: every node name in the project, lower-cased, to catch a follow-up that
+    names a new node but claims to be about the previous one."""
     if not parsed.is_lineage:
         return []
     violations = []
@@ -146,6 +169,15 @@ def check_parse(
                     None,
                     "same_node_entity",
                     f"same_node is true, so entity must be null, not {entity!r}",
+                )
+            )
+        elif other := _other_node_named(question, previous, known_names):
+            violations.append(
+                Violation(
+                    None,
+                    "same_node_names_another_node",
+                    f"the question names {other!r}, not the previous node; set same_node to "
+                    "false and copy that name into entity",
                 )
             )
     elif not entity:
@@ -172,12 +204,33 @@ def check_parse(
 
 
 def parse_question(
-    provider: LLMProvider, question: str, previous: PreviousQuestion | None = None
+    provider: LLMProvider,
+    question: str,
+    previous: PreviousQuestion | None = None,
+    known_names: frozenset[str] = frozenset(),
 ) -> Generated[ParsedQuestion]:
     return generate_checked(
         provider,
         system=system_prompt(),
         prompt=build_prompt(question, previous),
         output=ParsedQuestion,
-        check=lambda parsed: check_parse(parsed, question, previous),
+        check=lambda parsed: check_parse(parsed, question, previous, known_names),
     )
+
+
+def recover_reading(generated: Generated[ParsedQuestion], question: str) -> ParsedQuestion | None:
+    """Take the name from the question when the model's copy of it was the only problem.
+
+    Models sometimes fix a typo they were told to copy. If the question holds exactly one
+    node-like name, that name is used as written and resolve_node turns it into suggestions;
+    the model only said that a node was named (ADR 0004 still holds: nothing is guessed).
+    """
+    last = generated.attempts[-1] if generated.attempts else None
+    if last is None or last.error or not isinstance(last.output, ParsedQuestion):
+        return None
+    if {violation.rule for violation in last.violations} != {"entity_not_in_question"}:
+        return None
+    tokens = name_tokens(question)
+    if len(tokens) != 1:
+        return None
+    return last.output.model_copy(update={"entity": tokens[0]})

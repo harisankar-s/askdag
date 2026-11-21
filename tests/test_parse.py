@@ -1,5 +1,6 @@
 import pytest
 
+from asklineage.answer.generate import Attempt, Generated, Violation
 from asklineage.answer.parse import (
     EXAMPLES,
     ParsedQuestion,
@@ -8,7 +9,9 @@ from asklineage.answer.parse import (
     check_parse,
     clean_entity,
     entity_in_question,
+    name_tokens,
     parse_question,
+    recover_reading,
 )
 from asklineage.lineage.graph import Direction
 from asklineage.llm.scripted import ScriptedProvider
@@ -50,6 +53,43 @@ def test_a_follow_up_about_the_previous_node_passes():
     follow_up = parsed(entity=None, direction=Direction.UPSTREAM, same_node=True)
 
     assert check_parse(follow_up, "And upstream?", PREVIOUS) == []
+
+
+def test_name_tokens_are_backticked_or_have_an_underscore_or_a_dot():
+    question = "Does `orders` feed raw.payments or stg_orders, e.g. today?"
+
+    assert name_tokens(question) == ["orders", "raw.payments", "stg_orders", "e.g"]
+
+
+def test_a_follow_up_that_names_another_node_cannot_claim_the_previous_one():
+    follow_up = parsed(entity=None, direction=None, same_node=True)
+    known = frozenset({"stg_orders", "fct_orders"})
+    question = "And what does fct_orders feed?"
+
+    found = check_parse(follow_up, question, PREVIOUS, known)
+
+    assert rules(found) == ["same_node_names_another_node"]
+    assert check_parse(follow_up, "And what does stg_orders feed?", PREVIOUS, known) == []
+    assert check_parse(follow_up, question, PREVIOUS) == []  # no names known, nothing to catch
+
+
+def test_a_name_the_model_corrected_is_taken_from_the_question():
+    corrected = parsed("stg_orders")
+    question = "What depends on stg_ordrs?"
+    attempt = Attempt(violations=tuple(check_parse(corrected, question)), output=corrected)
+
+    assert recover_reading(Generated(None, (attempt,)), question).entity == "stg_ordrs"
+
+
+def test_no_recovery_with_two_names_other_problems_or_an_error():
+    corrected = parsed("stg_orders")
+    question = "What depends on stg_ordrs?"
+    entity = Attempt(violations=tuple(check_parse(corrected, question)), output=corrected)
+    direction = Attempt(violations=(Violation(None, "missing_direction", "x"),), output=corrected)
+
+    assert recover_reading(Generated(None, (entity,)), "Does stg_ordrs feed fct_x?") is None
+    assert recover_reading(Generated(None, (direction,)), question) is None
+    assert recover_reading(Generated(None, (Attempt(error="down"),)), question) is None
 
 
 def test_a_follow_up_needs_a_previous_question():
