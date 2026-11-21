@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>asklineage</title>
+<style>
+:root { color-scheme: light dark; --bg: #f5f6f8; --fg: #1b1f27; --muted: #667085; --card: #fff;
+  --soft: #f0f2f5; --line: #e2e5ea; --accent: #2457d6; --accent-fg: #fff; --warn: #8a5a00;
+  --warn-bg: #fff4d6; --err: #a31d1d; --err-bg: #fde8e8; --ok: #17703a;
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06); }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #101318; --fg: #e6e9ef; --muted: #98a2b3; --card: #181c23; --soft: #20252e;
+    --line: #2a303a; --accent: #7aa2ff; --accent-fg: #0b1020; --warn: #f0c36a;
+    --warn-bg: #3a2f12; --err: #ff8c8c; --err-bg: #3b1a1a; --ok: #5fd08a; --shadow: none; } }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 32px 16px 72px; }
+h1 { font-size: 1.6rem; letter-spacing: -0.02em; margin: 0 0 8px; }
+code { font: 0.88em ui-monospace, SFMono-Regular, Menlo, monospace; }
+.muted { color: var(--muted); font-size: 0.88rem; }
+.pill { display: inline-block; padding: 2px 10px; margin: 0 6px 4px 0; border-radius: 999px;
+  background: var(--soft); border: 1px solid var(--line); color: var(--muted); font-size: 0.8rem; }
+.pill b { color: var(--fg); font-weight: 600; }
+.pill.off { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
+form, .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px 18px; margin-top: 16px; box-shadow: var(--shadow); }
+.row { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin-top: 12px; }
+.row:first-child { margin-top: 0; align-items: center; }
+label { display: flex; flex-direction: column; gap: 4px; font-size: 0.82rem; color: var(--muted); }
+input, select, button { font: inherit; color: var(--fg); background: var(--card);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+input:focus-visible, select:focus-visible, button:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+.grow { flex: 1 1 260px; }
+.inline { flex-direction: row; align-items: center; gap: 6px; color: var(--fg); font-size: 0.9rem; }
+input[type=checkbox] { padding: 0; accent-color: var(--accent); }
+.seg { display: inline-flex; background: var(--soft); border: 1px solid var(--line);
+  border-radius: 9px; padding: 2px; }
+.seg label { position: relative; flex-direction: row; padding: 5px 14px; border-radius: 7px;
+  cursor: pointer; font-size: 0.9rem; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg label:has(input:checked) { background: var(--card); color: var(--fg); font-weight: 600;
+  box-shadow: 0 0 0 1px var(--line); }
+.seg label:has(input:focus-visible) { outline: 2px solid var(--accent); }
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent);
+  font-weight: 600; padding: 8px 20px; }
+button.primary:hover { filter: brightness(1.08); }
+button:disabled { opacity: 0.5; cursor: default; }
+.asked { font-weight: 600; font-size: 1.05rem; margin: 6px 0 8px; }
+.summary { margin: 0 0 10px; }
+.note { padding: 8px 12px; border-radius: 8px; margin: 10px 0; font-size: 0.88rem;
+  background: var(--warn-bg); color: var(--warn); }
+.error { background: var(--err-bg); color: var(--err); }
+.tag { font-size: 0.72rem; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px;
+  color: var(--muted); margin-left: 6px; white-space: nowrap; font-weight: 400; }
+table { border-collapse: collapse; width: 100%; font-size: 0.88rem; margin-top: 10px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line);
+  vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 0.74rem; text-transform: uppercase;
+  letter-spacing: 0.04em; }
+tbody tr:hover td { background: var(--soft); }
+.scroll { overflow-x: auto; }
+ul { margin: 8px 0; padding-left: 20px; }
+li { margin: 3px 0; }
+.cands { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+details { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+summary { cursor: pointer; color: var(--muted); font-size: 0.88rem; }
+pre { white-space: pre-wrap; word-break: break-word; margin: 2px 0; font-size: 0.8rem; }
+.pass { color: var(--ok); } .fail { color: var(--err); }
+.graph { overflow: auto; max-height: 520px; margin: 12px 0 6px; background: var(--soft);
+  border: 1px solid var(--line); border-radius: 8px; }
+.graph svg { display: block; }
+.gnode rect { fill: var(--card); stroke: var(--line); stroke-width: 1.5; }
+.gnode.source rect { stroke-dasharray: 4 3; }
+.gnode.seed rect { stroke-dasharray: 1 3; }
+.gnode.root rect { stroke: var(--accent); stroke-width: 2.5; }
+.gnode.click { cursor: pointer; }
+.gnode.click:hover rect, .gnode.click:focus rect { stroke: var(--accent); }
+.gnode text { fill: var(--fg); font-size: 12px; }
+.gedge { fill: none; stroke: var(--muted); stroke-width: 1.2; opacity: 0.7; }
+.garrow { fill: var(--muted); }
+.ghead { fill: var(--muted); font-size: 11px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>asklineage</h1>
+  <div class="muted" id="info">Loading…</div>
+
+  <form id="form">
+    <div class="row">
+      <div class="seg">
+        <label><input type="radio" name="mode" value="question" checked> Question</label>
+        <label><input type="radio" name="mode" value="structured"> Structured</label>
+      </div>
+      <label class="inline"><input type="checkbox" id="conversation"> Conversation</label>
+      <button type="button" id="newthread" hidden>New conversation</button>
+      <span class="muted" id="threadstate"></span>
+    </div>
+    <div class="row" id="questionrow">
+      <label class="grow">Question
+        <input id="question" maxlength="500" autocomplete="off"
+               placeholder="What depends on dim_schedule_feeds?">
+      </label>
+      <button class="primary" type="submit">Ask</button>
+    </div>
+    <div class="row" id="structuredrow" hidden>
+      <label class="grow">Node <input id="node" maxlength="300" autocomplete="off"
+             placeholder="dim_schedule_feeds"></label>
+      <label>Direction
+        <select id="direction">
+          <option value="">default</option>
+          <option value="downstream">downstream</option>
+          <option value="upstream">upstream</option>
+        </select>
+      </label>
+      <label>Depth <input id="depth" type="number" min="1" max="25" style="width: 5em"></label>
+      <button class="primary" type="submit">Ask</button>
+    </div>
+  </form>
+
+  <div id="results"></div>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const state = { threadId: null, lastBody: null, busy: false };
+
+function el(tag, props, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props || {})) {
+    if (key === "class") node.className = value;
+    else if (key === "onclick") node.addEventListener("click", value);
+    else node.setAttribute(key, value);
+  }
+  for (const child of children) {
+    if (child !== null && child !== undefined) node.append(child);
+  }
+  return node;
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svgEl(tag, props, ...children) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [key, value] of Object.entries(props || {})) {
+    if (key === "onclick") node.addEventListener("click", value);
+    else if (key === "onkeydown") node.addEventListener("keydown", value);
+    else node.setAttribute(key, value);
+  }
+  for (const child of children) node.append(child);
+  return node;
+}
+
+const G = { w: 180, h: 28, colGap: 80, rowGap: 10, pad: 12, head: 22, maxNodes: 40, loop: 36 };
+let graphCount = 0;
+
+function renderGraph(r) {
+  const root = { unique_id: r.node.unique_id, display_name: r.node.display_name,
+                 resource_type: r.node.resource_type, depth: 0 };
+  const everything = [root, ...r.table];
+  const nodes = everything.slice(0, G.maxNodes);
+  if (nodes.length < 2) return [];
+  const ids = new Set(nodes.map((n) => n.unique_id));
+  const edges = r.edges.filter((e) => ids.has(e.parent_id) && ids.has(e.child_id));
+  const maxDepth = Math.max(...nodes.map((n) => n.depth));
+  const upstream = r.direction === "upstream";
+  const columns = Array.from({ length: maxDepth + 1 }, () => []);
+  for (const n of nodes) columns[upstream ? maxDepth - n.depth : n.depth].push(n);
+
+  const step = G.h + G.rowGap;
+  const colHeight = Math.max(...columns.map((c) => c.length)) * step - G.rowGap;
+  const width = G.pad * 2 + (maxDepth + 1) * G.w + maxDepth * G.colGap;
+  const height = G.pad * 2 + G.head + colHeight;
+  const pos = new Map();
+  columns.forEach((members, c) => {
+    const offset = (colHeight - (members.length * step - G.rowGap)) / 2;
+    members.forEach((n, i) => pos.set(n.unique_id, {
+      x: G.pad + c * (G.w + G.colGap), y: G.pad + G.head + offset + i * step }));
+  });
+
+  const arrowId = "arrow" + (graphCount += 1);
+  const svg = svgEl("svg", { width, height, viewBox: "0 0 " + width + " " + height, role: "img",
+    "aria-label": "Lineage graph of " + r.node.display_name });
+  svg.append(svgEl("defs", {}, svgEl("marker", { id: arrowId, markerWidth: 8, markerHeight: 8,
+    refX: 8, refY: 4, orient: "auto" }, svgEl("path", { d: "M0,0 L8,4 L0,8 z", class: "garrow" }))));
+
+  columns.forEach((_, c) => {
+    const depth = upstream ? maxDepth - c : c;
+    svg.append(svgEl("text", { x: G.pad + c * (G.w + G.colGap), y: G.pad + 10, class: "ghead" },
+      depth === 0 ? "start" : "depth " + depth));
+  });
+
+  for (const e of edges) {
+    const p = pos.get(e.parent_id), q = pos.get(e.child_id);
+    const x1 = p.x + G.w, y1 = p.y + G.h / 2, y2 = q.y + G.h / 2;
+    let d;
+    if (q.x <= p.x) {
+      // Same or earlier column: leave the parent's right side and enter the child's right side.
+      const x2 = q.x + G.w, bulge = Math.max(x1, x2) + G.loop;
+      d = "M" + x1 + "," + y1 + " C" + bulge + "," + y1 + " " + bulge + "," + y2 + " " + x2 + "," + y2;
+    } else {
+      const mid = (q.x - x1) / 2;
+      d = "M" + x1 + "," + y1 + " C" + (x1 + mid) + "," + y1 + " " + (q.x - mid) + "," + y2
+        + " " + q.x + "," + y2;
+    }
+    svg.append(svgEl("path", { d, class: "gedge", "marker-end": "url(#" + arrowId + ")" }));
+  }
+
+  for (const n of nodes) {
+    const { x, y } = pos.get(n.unique_id);
+    const isRoot = n.unique_id === root.unique_id;
+    const label = n.display_name.length > 26 ? n.display_name.slice(0, 25) + "…" : n.display_name;
+    const ask = () => send({ node: n.unique_id, direction: r.direction, depth: r.depth },
+                           "Graph: " + n.display_name);
+    const props = { class: "gnode " + n.resource_type + (isRoot ? " root" : " click"),
+                    transform: "translate(" + x + "," + y + ")" };
+    if (!isRoot) {
+      Object.assign(props, { tabindex: 0, role: "button", "aria-label": "Ask about " + n.display_name,
+        onclick: ask, onkeydown: (ev) => { if (ev.key === "Enter") ask(); } });
+    }
+    svg.append(svgEl("g", props,
+      svgEl("title", {}, n.display_name + " (" + n.resource_type + ")"),
+      svgEl("rect", { width: G.w, height: G.h, rx: 5 }),
+      svgEl("text", { x: 8, y: G.h / 2, "dominant-baseline": "central" }, label)));
+  }
+
+  const frame = el("div", { class: "graph" }, svg);
+  // A wide fan-out makes a tall column that centres the start node; scroll it into view.
+  const rootY = pos.get(root.unique_id).y;
+  requestAnimationFrame(() => { frame.scrollTop = Math.max(0, rootY - 120); });
+  const parts = [frame,
+    el("div", { class: "muted" }, "Arrows run from a model to what reads it. Scroll the graph if it is tall. Click a node to ask about it. "
+      + "Dashed outline: source. Dotted: seed.")];
+  if (everything.length > nodes.length) {
+    parts.push(el("div", { class: "note" }, "Graph shows the first " + nodes.length + " of "
+      + everything.length + " nodes. The table below lists all of them."));
+  }
+  return parts;
+}
+
+function table(headers, rows) {
+  const head = el("tr", {}, ...headers.map((h) => el("th", {}, h)));
+  const body = rows.map((row) => el("tr", {}, ...row.map((cell) => el("td", {}, cell))));
+  return el("div", { class: "scroll" }, el("table", {}, el("thead", {}, head), el("tbody", {}, ...body)));
+}
+
+// The server marks node names with backticks; show them as code, as DOM nodes.
+function rich(text) {
+  return text.split("`").map((part, i) => (i % 2 ? el("code", {}, part) : part));
+}
+
+function show(text) { return text === null || text === undefined ? "–" : String(text); }
+
+async function loadInfo() {
+  try {
+    const res = await fetch("/api/info");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const info = await res.json();
+    const projects = info.projects.length ? info.projects.join(", ") : "none loaded";
+    const off = info.llm_provider === "none";
+    $("info").replaceChildren(
+      el("span", { class: "pill" }, "Project ", el("b", {}, projects)),
+      el("span", { class: "pill" + (off ? " off" : "") }, "LLM ",
+         el("b", {}, off ? "none" : info.llm_provider + " / " + info.llm_model)),
+      off ? el("span", { class: "muted" }, "Free text will abstain; use Structured mode.") : null);
+  } catch (err) {
+    $("info").textContent = "Could not load /api/info (" + err.message + "). Is the database up?";
+  }
+}
+
+function errorMessage(status, body) {
+  const detail = body && body.detail;
+  let text;
+  if (Array.isArray(detail)) {
+    text = detail.map((d) => (d.loc ? d.loc.slice(1).join(".") + ": " : "") + d.msg).join("; ");
+  } else {
+    text = typeof detail === "string" ? detail : "Unexpected error.";
+  }
+  const label = { 404: "Thread not found", 409: "Conflict", 422: "Invalid request" }[status];
+  return (label || "HTTP " + status) + ": " + text;
+}
+
+function renderLineage(r) {
+  const parts = [
+    el("p", { class: "asked" }, r.direction + " of " + r.node.display_name + ", depth " + r.depth,
+       el("span", { class: "tag" }, r.node.resource_type)),
+    el("p", { class: "summary" }, ...rich(r.summary)),
+  ];
+  if (r.highlights.length) {
+    parts.push(el("ul", {}, ...r.highlights.map((h) =>
+      el("li", {}, ...rich(h.text), el("span", { class: "tag" }, h.hops)))));
+  } else if (r.highlight_status === "rejected") {
+    parts.push(el("div", { class: "note" }, "The model's highlights failed the checks and were dropped."));
+  }
+  if (r.facts.truncated) {
+    parts.push(el("div", { class: "note" },
+      "Truncated: the walk hit its depth limit, so there are more nodes beyond depth " + r.depth + "."));
+  }
+  parts.push(...renderGraph(r));
+  parts.push(table(["Depth", "Type", "Name", "Owner", "Owner source"],
+    r.table.map((n) => [show(n.depth), n.resource_type, el("code", {}, n.display_name),
+      n.owner === null ? el("span", { class: "muted" }, "no owner recorded") : n.owner,
+      show(n.owner_source)])));
+  return parts;
+}
+
+function renderClarification(r) {
+  const buttons = r.candidates.map((c) => el("button", {
+    type: "button",
+    onclick: () => choose(c, r.resumable),
+  }, c.display_name, el("span", { class: "tag" }, c.resource_type + " · " + c.score.toFixed(2))));
+  return [
+    el("p", { class: "asked" }, "Which one did you mean?"),
+    el("p", {}, r.message),
+    buttons.length ? el("div", { class: "cands" }, ...buttons) : null,
+  ];
+}
+
+function renderAbstain(r) {
+  return [el("p", { class: "asked" }, "No answer (" + r.reason + ")"), el("p", {}, r.message)];
+}
+
+function renderAttempts(attempts) {
+  if (!attempts.length) return el("details", {}, el("summary", {}, "How this was answered"),
+    el("p", { class: "muted" }, "No model calls were made. Code answered from the manifest."));
+  const rows = attempts.map((a) => [
+    a.stage,
+    el("span", { class: a.passed ? "pass" : "fail" }, a.passed ? "passed" : "failed"),
+    show(a.latency_ms),
+    show(a.input_tokens) + " / " + show(a.output_tokens),
+    el("div", {},
+      a.error ? el("pre", { class: "fail" }, a.error) : null,
+      ...a.violations.map((v) => el("pre", { class: "fail" }, v)),
+      a.reply ? el("pre", {}, a.reply) : null),
+  ]);
+  return el("details", {}, el("summary", {}, "How this was answered (" + attempts.length + " model call"
+    + (attempts.length === 1 ? "" : "s") + ")"),
+    table(["Stage", "Result", "ms", "Tokens in / out", "Reply"], rows));
+}
+
+function addCard(label, children) {
+  const card = el("div", { class: "card" });
+  if (label) card.append(el("div", { class: "muted" }, label));
+  for (const child of children) if (child) card.append(child);
+  $("results").prepend(card);
+}
+
+async function send(body, label) {
+  if (state.busy) return;
+  state.busy = true;
+  document.querySelectorAll("button").forEach((b) => (b.disabled = true));
+  try {
+    const sent = { ...body };
+    if ($("conversation").checked && !body.thread_id) {
+      if (state.threadId) sent.thread_id = state.threadId;
+      else sent.start_thread = true;
+    }
+    state.lastBody = body;
+    const res = await fetch("/api/ask", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(sent),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (_) { /* not JSON */ }
+    if (!res.ok) {
+      if (res.status === 404) resetThread();
+      addCard(label, [el("div", { class: "note error" }, errorMessage(res.status, data))]);
+      return;
+    }
+    if (data.thread_id) setThread(data.thread_id);
+    const render = { lineage: renderLineage, clarification: renderClarification, abstain: renderAbstain };
+    addCard(label, [...render[data.kind](data), renderAttempts(data.attempts)]);
+  } catch (err) {
+    addCard(label, [el("div", { class: "note error" }, "Request failed: " + err.message)]);
+  } finally {
+    state.busy = false;
+    document.querySelectorAll("button").forEach((b) => (b.disabled = false));
+  }
+}
+
+function choose(candidate, resumable) {
+  const label = "Chose " + candidate.display_name;
+  if (resumable && state.threadId) {
+    send({ thread_id: state.threadId, choose: candidate.unique_id }, label);
+    return;
+  }
+  const body = { node: candidate.unique_id };
+  const last = state.lastBody || {};
+  if (last.direction) body.direction = last.direction;
+  if (last.depth) body.depth = last.depth;
+  send(body, label);
+}
+
+function setThread(id) {
+  state.threadId = id;
+  $("threadstate").textContent = "Conversation " + id.slice(0, 8);
+  $("newthread").hidden = false;
+}
+
+function resetThread() {
+  state.threadId = null;
+  $("threadstate").textContent = "";
+  $("newthread").hidden = true;
+}
+
+function currentMode() { return document.querySelector("input[name=mode]:checked").value; }
+
+$("form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (currentMode() === "question") {
+    const question = $("question").value.trim();
+    if (!question) return;
+    send({ question }, question);
+    $("question").value = "";
+    return;
+  }
+  const node = $("node").value.trim();
+  if (!node) return;
+  const body = { node };
+  if ($("direction").value) body.direction = $("direction").value;
+  if ($("depth").value) body.depth = Number($("depth").value);
+  send(body, [node, body.direction, body.depth && "depth " + body.depth].filter(Boolean).join(" · "));
+});
+
+document.querySelectorAll("input[name=mode]").forEach((radio) =>
+  radio.addEventListener("change", () => {
+    const structured = currentMode() === "structured";
+    $("questionrow").hidden = structured;
+    $("structuredrow").hidden = !structured;
+  }));
+
+$("conversation").addEventListener("change", () => { if (!$("conversation").checked) resetThread(); });
+$("newthread").addEventListener("click", resetThread);
+
+loadInfo();
+</script>
+</body>
+</html>

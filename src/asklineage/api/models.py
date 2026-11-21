@@ -96,6 +96,11 @@ class NodeRow(BaseModel):
         )
 
 
+class EdgeInfo(BaseModel):
+    parent_id: str
+    child_id: str
+
+
 class OwnerInfo(BaseModel):
     owner: str
     owner_source: str
@@ -176,6 +181,7 @@ class LineageResponse(BaseModel):
     highlights: list[HighlightInfo]
     highlight_status: HighlightStatus
     table: list[NodeRow]
+    edges: list[EdgeInfo]  # parent -> child in both directions; may reference the root
     attempts: list[AttemptInfo] = []
     thread_id: UUID | None = None
 

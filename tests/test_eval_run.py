@@ -5,7 +5,12 @@ import pytest
 from synthetic_manifest import build_manifest
 
 from asklineage.api.flow import run_ask
-from asklineage.api.models import AbstainResponse, AskRequest, ClarificationResponse
+from asklineage.api.models import (
+    AbstainResponse,
+    AskRequest,
+    ClarificationResponse,
+    EdgeInfo,
+)
 from asklineage.eval.conformance import loaded_owners
 from asklineage.eval.golden import GoldenSet, NameIndex, build_golden
 from asklineage.eval.report import fmt, render, summarize
@@ -92,6 +97,23 @@ def test_a_wrong_table_or_count_is_a_silent_wrong_answer_and_a_bug(
     miscounted = score(context, golden, "s-hub-down", 1, answer.model_copy(update={"facts": facts}))
     assert (miscounted.outcome, miscounted.facts_ok) == ("silent_wrong", False)
     assert summarize([scored, miscounted], llm=True)["bugs"] == ["s-hub-down turn 1"] * 2
+
+
+def test_edges_that_differ_from_the_manifest_are_a_silent_wrong_answer(
+    context: EvalContext, golden: GoldenSet
+) -> None:
+    answer = hub_answer(context)
+    assert answer.edges
+    assert score(context, golden, "s-hub-down", 1, answer).outcome == "correct"
+
+    invented = EdgeInfo(parent_id="model.synthetic.invented", child_id=HUB)
+    tampered = answer.model_copy(update={"edges": [*answer.edges[1:], invented]})
+    scored = score(context, golden, "s-hub-down", 1, tampered)
+    assert (scored.outcome, scored.lineage_ok, scored.facts_ok) == ("silent_wrong", False, True)
+    assert "edges differ from the manifest: 1 missing, 1 extra, 0 duplicated" in scored.problems
+
+    doubled = answer.model_copy(update={"edges": [*answer.edges, answer.edges[0]]})
+    assert score(context, golden, "s-hub-down", 1, doubled).lineage_ok is False
 
 
 def test_a_follow_up_answered_about_the_previous_node_is_flagged(

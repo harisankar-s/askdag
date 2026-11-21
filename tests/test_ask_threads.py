@@ -7,6 +7,7 @@ from ask_examples import (
     EDGES,
     FCT_ORDERS,
     HIGHLIGHTS,
+    MART_WEEKLY,
     NODES,
     NOT_LINEAGE,
     ORDERS,
@@ -208,6 +209,11 @@ def test_the_checkpoint_keeps_the_previous_node_not_the_walk(conn, threads):
 
     assert answer.highlight_status is HighlightStatus.PASSED
     assert values["result"] is None
+    assert values["response"].edges == answer.edges
+    assert [(e.parent_id, e.child_id) for e in answer.edges] == [
+        (FCT_ORDERS.unique_id, MART_WEEKLY.unique_id),
+        (STG_ORDERS.unique_id, FCT_ORDERS.unique_id),
+    ]
     previous = values["previous"]
     assert isinstance(previous, Remembered)
     assert previous.root.unique_id == STG_ORDERS.unique_id

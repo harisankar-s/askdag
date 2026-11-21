@@ -3,7 +3,17 @@ from uuid import uuid4
 
 import psycopg
 import pytest
-from ask_examples import FCT_ORDERS, HIGHLIGHTS, ORDERS, PARSE, RAW_ORDERS, STG_ORDERS
+from ask_examples import (
+    EDGES,
+    FCT_ORDERS,
+    HIGHLIGHTS,
+    MART_WEEKLY,
+    NODES,
+    ORDERS,
+    PARSE,
+    RAW_ORDERS,
+    STG_ORDERS,
+)
 from fastapi.testclient import TestClient
 from helpers import TEST_PROJECT
 from langgraph.checkpoint.memory import InMemorySaver
@@ -36,6 +46,17 @@ def db_client(client, conn, load_graph) -> TestClient:
     )
     app.dependency_overrides[get_conn] = lambda: conn
     return client
+
+
+@pytest.fixture
+def chain_client(client, conn, load_graph) -> TestClient:
+    load_graph(NODES, EDGES)
+    app.dependency_overrides[get_conn] = lambda: conn
+    return client
+
+
+def edge_pairs(data: dict) -> list[tuple[str, str]]:
+    return [(edge["parent_id"], edge["child_id"]) for edge in data["edges"]]
 
 
 def post(client, **body) -> dict:
@@ -89,6 +110,29 @@ def test_structured_request_returns_the_lineage_contract(db_client):
             "owner_source": "owners_file",
         }
     ]
+    assert data["edges"] == [{"parent_id": STG_ORDERS.unique_id, "child_id": FCT_ORDERS.unique_id}]
+
+
+def test_edges_join_the_root_and_the_table_rows(chain_client):
+    data = post(chain_client, node="stg_orders", project=TEST_PROJECT)
+
+    ids = {data["node"]["unique_id"]} | {row["unique_id"] for row in data["table"]}
+    assert edge_pairs(data) == [
+        (FCT_ORDERS.unique_id, MART_WEEKLY.unique_id),
+        (STG_ORDERS.unique_id, FCT_ORDERS.unique_id),
+    ]
+    assert all(parent in ids and child in ids for parent, child in edge_pairs(data))
+
+
+def test_an_upstream_walk_keeps_edges_parent_to_child(chain_client):
+    data = post(chain_client, node="mart_weekly", direction="upstream", project=TEST_PROJECT)
+
+    assert [row["display_name"] for row in data["table"]] == [
+        "fct_orders",
+        "stg_orders",
+        "raw.orders",
+    ]
+    assert sorted(edge_pairs(data)) == sorted(EDGES)
 
 
 def test_free_text_with_an_llm_returns_attempts_by_stage(db_client):
@@ -121,6 +165,14 @@ def test_a_thread_clarifies_then_answers_the_choice(db_client):
     assert chosen["kind"] == "lineage"
     assert chosen["node"]["unique_id"] == ORDERS.unique_id
     assert chosen["thread_id"] == thread_id
+    assert chosen["edges"] == []
+
+
+def test_a_threaded_answer_carries_its_edges(db_client):
+    data = post(db_client, node="stg_orders", project=TEST_PROJECT, start_thread=True)
+
+    assert data["thread_id"] is not None
+    assert edge_pairs(data) == [(STG_ORDERS.unique_id, FCT_ORDERS.unique_id)]
 
 
 def test_an_unknown_thread_is_not_found(db_client):

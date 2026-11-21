@@ -16,7 +16,7 @@ The author is a data engineering architect building this to learn enterprise RAG
 ## Stack and conventions
 
 - Python 3.12, uv (`uv add`, `uv sync`, `uv run`), FastAPI, psycopg 3 with a connection pool, Postgres 17 + pgvector in `docker-compose.yml`. LangGraph orchestrates `/api/ask` (graph runtime only, no LangChain models; ADR 0008).
-- Layout: `src/asklineage/` (package; `eval/` holds the eval harness), `tests/`, `scripts/`, `config/`, `docs/decisions/`, `tools/dbt/`.
+- Layout: `src/asklineage/` (package; `eval/` holds the eval harness, `web/` the static UI page), `tests/`, `scripts/`, `config/`, `docs/decisions/`, `tools/dbt/`.
 - Ruff for lint and format (line length 100); CI runs `ruff check`, `ruff format --check` and `pytest` (`.github/workflows/ci.yml`).
 - Keep parsing pure (no database) so it's unit-testable with `tests/fixtures/mini_manifest.json`; database writes live in `ingest/load.py`.
 - `src/asklineage/sql/schema.sql` is idempotent (`IF NOT EXISTS`) and applied by `asklineage init-db`. Changing an existing column needs a manual migration; say so when it comes up.
@@ -35,6 +35,8 @@ uv run asklineage lineage dim_schedule_feeds --direction downstream --depth 2 --
 uv run python scripts/manifest_stats.py data/manifests/calitp/manifest.json
 uv run asklineage llm-check
 uv run uvicorn asklineage.main:app --reload
+open http://localhost:8000/
+curl -s localhost:8000/api/info
 curl -s localhost:8000/api/ask -H 'content-type: application/json' -d '{"node": "dim_schedule_feeds"}'
 curl -s localhost:8000/api/ask -H 'content-type: application/json' -d '{"question": "What depends on dim_schedule_feeds?", "start_thread": true}'
 uv run asklineage prune-threads --older-than-hours 24
@@ -68,7 +70,7 @@ Key design rules:
 | Phase | Goal | Status |
 |---|---|---|
 | 0 | Starter kit: FastAPI, Postgres + pgvector, CI | Done |
-| 1 | Lineage MVP | In progress |
+| 1 | Lineage MVP | Done (pending 8c review) |
 | 2 | pgvector semantic search + question classifier | Planned |
 | 3 | Synthetic incidents, runbooks, Slack threads; hybrid retrieval | Planned |
 | 4 | Refresh on dbt deploy; second project (Snowflake); manifest diffing | Planned |
@@ -95,7 +97,10 @@ Phase 1 steps:
    - 7b.2 `eval/score.py` (one outcome per turn: correct, acceptable, safe_wrong, silent_wrong, blocked, error; the answer's own walk is always checked against the manifest), `eval/run.py` (`run_ask` per turn, threads on `InMemorySaver`, warm-up parse, run metadata), `eval/report.py` (per-layer summary, counts with % only from 20 turns), `asklineage eval run` (exits 1 on lineage, facts or error bugs) writing `data/eval/runs/<time>-<model>/` — done; Cal-ITP without an LLM: 55 correct, 1 expected block, 0 silent wrong, lineage and facts 13/13
    - 7c `AttemptInfo.rules` (violation rule names); `eval/highlights.py`: first-attempt failures split into hallucination vs output rules, kept highlights re-checked against manifest edges and paths, usefulness proxy (minority-team hit, coverage, alphabetical bias, reach past one hop) vs code baseline (first named nodes via `build_facts`) and seeded random — done. qwen2.5:7b on Cal-ITP: 51 correct / 1 acceptable / 2 safe wrong / 1 silent wrong of 55; reading 24/25; highlights true (0 of 96 contradicted) but worse than random at choosing (minority-team hit 3/17 vs code 17/17, random 16/17); parse p50 691 ms, highlights p50 4.95 s. Then: `check_parse` rule `same_node_names_another_node` (project node names passed on follow-ups) and `recover_reading` (a typo the model corrected is resolved from the question's only name-like token) — done. Rerun: 53 correct / 1 acceptable / 0 safe wrong / 2 silent wrong; both fixes worked, and the two silent errors are now direction errors the old behaviour hid. `AttemptInfo.reply` added and traced: both times the parse retry flipped a direction the first attempt had right. Fix: `keep_first_reading` keeps direction and depth from the first attempt unless it was flagged for them — done. Final qwen2.5:7b run on Cal-ITP: 55 correct / 1 acceptable / 0 wrong of 56; reading 25/25; follow-ups 7/7; highlights true but still worse than random at choosing (deferred)
    - The rest moved to Phase 6 (eval v2): a bigger golden set, hand labels for the usefulness proxy, and choosing highlights in code (own ADR; revisit when Phase 2 adds descriptions)
-8. **Next:** README update: architecture, quickstart, sample data with the Cal-ITP commit hash, first results
+8. Web UI and README
+   - 8a web UI (ADR 0011): `web/index.html` (static, plain JS, no `innerHTML`) served at `GET /`; `GET /api/info` (projects, LLM provider and model, no secrets); question and structured modes, conversation toggle, all three response kinds, attempts panel; Python tests for `/`, `/api/info` and the `innerHTML` rule, none for the JavaScript (checked by hand) — built, awaiting review
+   - 8a.2 graph view: edges in `/api/ask` (`LineageResponse.edges`, parent -> child, checked by the eval against the manifest; ADR 0011 addendum) — done; SVG graph in the page (columns by depth, 40-node cap, click to ask, hand-checked) — built, awaiting review
+   - 8c README: architecture diagram, quickstart (Cal-ITP pinned at 546e354, manifest at `warehouse/manifest.json`), Ollama setup, sample data and AGPL note, first results from ADR 0010, roadmap, known limits, screenshot placeholder (add `docs/images/web-ui.png`) — written, awaiting review. Phase 1 is complete after review.
 
 ## Evaluation approach
 
@@ -113,3 +118,4 @@ Evaluate each layer separately: classifier accuracy, name resolution, lineage se
 - `0008` LangGraph orchestrates `/api/ask` (for 6b checkpoints and Phase 3 loops, and to learn it); plain functions would do for 6a
 - `0009` Conversation threads: opt-in, server-issued IDs, Postgres checkpoints, turn-scoped state reset, `interrupt()` clarifications, follow-ups, locks and pruning
 - `0010` Eval v1: exhaustive lineage conformance against an independent stdlib BFS over `depends_on`; synthetic manifest in CI; question set per layer (7b–7d)
+- `0011` Web UI: one static HTML page served by FastAPI, using only `/api/ask` and `/api/info`, with a hand-written SVG graph; not Streamlit/Gradio or React

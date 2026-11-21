@@ -1,8 +1,9 @@
 """Score one golden turn against the response the flow gave. Pure: no database, no LLM.
 
 Outcomes, worst first:
-- silent_wrong: a lineage answer about the wrong node, direction or depth, or with a table or
-  facts that differ from the manifest. The user is told something false and isn't warned.
+- silent_wrong: a lineage answer about the wrong node, direction or depth, or with a table,
+  edges or facts that differ from the manifest. The user is told something false and isn't
+  warned.
 - safe_wrong: the wrong clarification or abstention. The user gets no answer, but no false one.
 - acceptable: another outcome the golden set lists as safe for this turn.
 - correct.
@@ -44,7 +45,7 @@ class TurnScore:
     node_ok: bool | None = None
     direction_ok: bool | None = None
     depth_ok: bool | None = None
-    lineage_ok: bool | None = None  # the table and truncated flag match the manifest
+    lineage_ok: bool | None = None  # the table, edges and truncated flag match the manifest
     facts_ok: bool | None = None  # the summary's counts match the manifest
     candidates_ok: bool | None = None  # ambiguous: exactly the expected candidates
     suggestion_rank: int | None = None  # 1-based; 0 when the expected node wasn't suggested
@@ -82,17 +83,27 @@ def check_lineage(
     problems = []
 
     got = {row.unique_id: row.depth for row in response.table}
-    lineage_ok = (
+    table_ok = (
         got == truth.depths
         and len(response.table) == len(got)
         and response.facts.truncated == truth.truncated
     )
-    if not lineage_ok:
+    if not table_ok:
         missing, extra = truth.depths.keys() - got.keys(), got.keys() - truth.depths.keys()
         problems.append(
             f"table differs from the manifest: {len(missing)} missing, {len(extra)} extra, "
             f"truncated {response.facts.truncated} (expected {truth.truncated})"
         )
+
+    edges = {(edge.parent_id, edge.child_id) for edge in response.edges}
+    edges_ok = edges == truth.edges and len(response.edges) == len(edges)
+    if not edges_ok:
+        missing, extra = truth.edges - edges, edges - truth.edges
+        problems.append(
+            f"edges differ from the manifest: {len(missing)} missing, {len(extra)} extra, "
+            f"{len(response.edges) - len(edges)} duplicated"
+        )
+    lineage_ok = table_ok and edges_ok
 
     ids = truth.depths
     owner_counts: Counter[str] = Counter()

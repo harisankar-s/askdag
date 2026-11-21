@@ -38,6 +38,7 @@ from asklineage.api.models import (
     AttemptInfo,
     CandidateInfo,
     ClarificationResponse,
+    EdgeInfo,
     FactsInfo,
     HighlightInfo,
     LineageResponse,
@@ -146,6 +147,7 @@ STATE_TYPES: tuple[type, ...] = (
     NodeInfo,
     CandidateInfo,
     NodeRow,
+    EdgeInfo,
     FactsInfo,
     OwnerInfo,
     HighlightInfo,
@@ -314,13 +316,14 @@ def answer(state: AskState, runtime: Runtime[AskContext]) -> AskState:
         highlights=highlights,
         highlight_status=lineage_answer.status,
         table=[NodeRow.from_node(node) for node in lineage_answer.lineage.nodes],
+        edges=[EdgeInfo(parent_id=p, child_id=c) for p, c in lineage_answer.lineage.edges],
     )
     attempts = [AttemptInfo.from_attempt("highlights", a) for a in lineage_answer.attempts]
     return {
         "response": response,
         "attempts": attempts,
         "previous": Remembered(root, query.direction, query.depth),
-        # The response already holds the table; don't checkpoint the whole walk as well.
+        # The response already holds the table and edges; don't checkpoint the whole walk as well.
         "result": None,
     }
 
