@@ -19,7 +19,14 @@ from asklineage.answer.lineage_answer import HighlightStatus, LineageAnswer, ans
 from asklineage.api.flow import checkpoint_serde
 from asklineage.api.threads import prune_threads
 from asklineage.config import get_settings
-from asklineage.eval.conformance import DEPTHS, StaleLoadError, run_conformance
+from asklineage.eval.conformance import (
+    DEPTHS,
+    StaleLoadError,
+    check_loaded,
+    loaded_owners,
+    run_conformance,
+)
+from asklineage.eval.golden import PHRASINGS, GoldenSetError, build_golden, describe
 from asklineage.eval.truth import truth_graph
 from asklineage.ingest.load import apply_schema, load_manifest
 from asklineage.ingest.manifest import UnsupportedManifestError, parse_manifest
@@ -70,10 +77,15 @@ def main(argv: list[str] | None = None) -> None:
         "--depths", type=int, nargs="+", default=list(DEPTHS), help="depths to walk at"
     )
     conformance.add_argument("--show", type=int, default=20, help="mismatches to print")
+    golden = evals.add_parser("golden", help="Show the golden question set built from a manifest")
+    golden.add_argument("manifest", type=Path, help="the manifest that was loaded")
+    golden.add_argument("--phrasings", choices=PHRASINGS, default="one")
+    golden.add_argument("--json", type=Path, dest="json_path", help="also write the set here")
     args = parser.parse_args(argv)
     if args.command == "lineage" and not 1 <= args.depth <= MAX_DEPTH:
         parser.error(f"--depth must be between 1 and {MAX_DEPTH}")
-    if args.command == "eval" and not all(1 <= depth <= MAX_DEPTH for depth in args.depths):
+    checks_depths = args.command == "eval" and args.eval_command == "conformance"
+    if checks_depths and not all(1 <= depth <= MAX_DEPTH for depth in args.depths):
         parser.error(f"--depths must be between 1 and {MAX_DEPTH}")
     if args.command == "llm-check":
         _check_llm()
@@ -95,6 +107,8 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Pruned {pruned} thread(s) unused for {args.older_than_hours:g} hours or more.")
         elif args.command == "lineage":
             _show_lineage(conn, args)
+        elif args.command == "eval" and args.eval_command == "golden":
+            _eval_golden(conn, args)
         elif args.command == "eval":
             _eval_conformance(conn, args)
         else:
@@ -147,6 +161,23 @@ def _load_manifest(
     print(f"  columns  {len(parsed.columns):>6}")
     print(f"  tests    {len(parsed.tests):>6}  ({unattached} not attached to a node)")
     print(f"  owners   {dict(owner_sources)}")
+
+
+def _eval_golden(conn: psycopg.Connection, args: argparse.Namespace) -> None:
+    manifest = json.loads(args.manifest.read_text())
+    graph = truth_graph(manifest)
+    try:
+        check_loaded(conn, graph)
+        owners = loaded_owners(conn, graph.project_name)
+        golden = build_golden(manifest, graph, owners, args.phrasings)
+    except (StaleLoadError, GoldenSetError) as exc:
+        print(exc)
+        raise SystemExit(1) from exc
+    print(describe(golden))
+    if args.json_path:
+        args.json_path.parent.mkdir(parents=True, exist_ok=True)
+        args.json_path.write_text(json.dumps(golden.to_dict(), indent=2, sort_keys=True))
+        print(f"Wrote {args.json_path}")
 
 
 def _eval_conformance(conn: psycopg.Connection, args: argparse.Namespace) -> None:

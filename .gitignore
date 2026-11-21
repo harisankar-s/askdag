@@ -18,6 +18,7 @@ build/
 # dbt artifacts and downloaded projects
 data/raw/
 data/manifests/
+data/eval/
 target/
 dbt_packages/
 logs/

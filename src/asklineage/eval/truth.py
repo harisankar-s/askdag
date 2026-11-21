@@ -74,6 +74,8 @@ def walk(graph: TruthGraph, root: str, direction: str, max_depth: int) -> TruthW
     seen = {root}
     frontier = [root]
     for hops in range(1, max_depth + 1):
+        if not frontier:
+            break
         reached = []
         for node in frontier:
             for neighbour in step.get(node, ()):

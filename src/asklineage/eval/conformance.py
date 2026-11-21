@@ -26,6 +26,8 @@ LATEST_LOAD = """
 
 PROJECT_NODES = "SELECT unique_id FROM nodes WHERE project_name = %s"
 
+PROJECT_OWNERS = "SELECT unique_id, owner FROM nodes WHERE project_name = %s"
+
 PROJECT_EDGES = """
     SELECT e.parent_id, e.child_id
     FROM lineage_edges e
@@ -36,6 +38,12 @@ PROJECT_EDGES = """
 
 class StaleLoadError(RuntimeError):
     pass
+
+
+def loaded_owners(conn: psycopg.Connection, project: str) -> dict[str, str | None]:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(PROJECT_OWNERS, (project,))
+        return {row["unique_id"]: row["owner"] for row in cur.fetchall()}
 
 
 @dataclass(frozen=True)

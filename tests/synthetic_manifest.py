@@ -1,9 +1,9 @@
 """A seeded synthetic dbt manifest, big enough to catch walk bugs the mini manifest can't.
 
 It has diamonds whose paths differ in length, a hub with many children, a chain longer than
-MAX_DEPTH with a shortcut across it, a snapshot, test nodes that must be ignored, and two
-sources that share a table name. parent_map and depends_on are written from the same edges,
-as dbt writes them.
+MAX_DEPTH with a shortcut across it, a snapshot, test nodes that must be ignored, two sources
+that share a table name, and a name that begins another (int_hub, int_hub_daily). parent_map
+and depends_on are written from the same edges, as dbt writes them.
 """
 
 import random
@@ -60,6 +60,7 @@ def build_manifest(seed: int = 7, models: int = 120) -> dict:
     accounts = f"source.{PROJECT}.raw_crm.accounts"
     snapshot = add("snapshot", "snap_accounts", "snapshots/snap_accounts.sql", [accounts])
     hub = add("model", "int_hub", "models/intermediate/int_hub.sql", [staging[0]])
+    add("model", "int_hub_daily", "models/intermediate/int_hub_daily.sql", [hub])
 
     # Each model reads only from nodes made before it, so the graph stays acyclic.
     pool = [*staging, *seeds, snapshot, hub]
