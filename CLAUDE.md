@@ -1,0 +1,84 @@
+# asklineage
+
+An open-source assistant that answers data-team questions about a dbt project: where a model's data comes from, what breaks downstream, who owns it, whether it has broken before and how it was fixed. It's a reference build for small teams, compared against Snowflake Cortex, dbt Wizard, Atlan and DataHub.
+
+The author is a data engineering architect building this to learn enterprise RAG, publish a reusable public repo, and prepare for architect interviews. Every design choice should be explainable as a trade-off.
+
+## How to work with the author
+
+- **Write the code; don't run commands.** Give numbered steps with each command in its own `bash` block, what it does, and the expected output. The author runs everything in the VS Code terminal and pastes results back. Reading files to check things is fine.
+- Explain the idea and the design before writing code, then stop after each step for questions.
+- Be direct and push back when a choice doesn't hold up.
+- For external downloads, give the browser option first (URL, button, where to unzip), then the CLI.
+- No LinkedIn angles mid-build. There will be one launch post at the end (demo video, GitHub link, one trade-off) plus a longer article. Record real trade-offs in `docs/decisions/` as they come up; that's the article's source material.
+- Don't copy code from `../ATLAS-Enterprise-AI`. It's someone else's Apache-2.0 project; this repo is a clean rewrite.
+
+## Stack and conventions
+
+- Python 3.12, uv (`uv add`, `uv sync`, `uv run`), FastAPI, psycopg 3 with a connection pool, Postgres 17 + pgvector in `docker-compose.yml`.
+- Layout: `src/asklineage/` (package), `tests/`, `scripts/`, `config/`, `docs/decisions/`, `tools/dbt/`.
+- Ruff for lint and format (line length 100); CI runs `ruff check`, `ruff format --check` and `pytest` (`.github/workflows/ci.yml`).
+- Keep parsing pure (no database) so it's unit-testable with `tests/fixtures/mini_manifest.json`; database writes live in `ingest/load.py`.
+- `src/asklineage/sql/schema.sql` is idempotent (`IF NOT EXISTS`) and applied by `asklineage init-db`. Changing an existing column needs a manual migration; say so when it comes up.
+- Add a dependency only in the step that first needs it.
+- Default to no comments; one short line only when the reason isn't obvious.
+
+## Common commands
+
+```bash
+docker compose up -d
+uv run ruff format . && uv run ruff check . && uv run pytest
+uv run asklineage init-db
+uv run asklineage load-manifest data/manifests/calitp/manifest.json --owners config/owners.calitp.yml
+uv run python scripts/manifest_stats.py data/manifests/calitp/manifest.json
+```
+
+## Sample data
+
+- **Cal-ITP `data-infra`** (github.com/cal-itp/data-infra, BigQuery, AGPL-3.0). The dbt project is in `warehouse/`, cloned into `data/raw/data-infra/` (git-ignored). Never commit their files or the manifest.
+- GitLab's analytics repo was the first choice but went private in 2026 (403, docs site behind sign-in).
+- Manifest produced with `uvx --python 3.12 --from "dbt-core==1.10.8" --with "dbt-bigquery==1.10.2" dbt parse --project-dir data/raw/data-infra/warehouse`, using `DBT_PROFILES_DIR=tools/dbt` (placeholder BigQuery profile `calitp_warehouse`). Parse warnings about missing `external_enghouse` sources come from a bug in their project and can be ignored.
+- Manifest stats: 628 models, 220 sources, 17 seeds, 351 tests, 1,198 edges into models, 67% of models and 79% of columns described, **0 owners in dbt**.
+- Owners come from `config/owners.calitp.yml`: synthetic, path-based, with some folders left unowned on purpose (27 nodes have no owner).
+- `parse` gives no `catalog.json` (column types) or `run_results.json` (run history); those need a live warehouse.
+
+## Architecture (target)
+
+Sources (dbt manifests, model descriptions, incident docs) → ingestion (manifest parser, chunk and embed, incident loader) → Postgres + pgvector (lineage tables, vector chunks, incidents) → LangGraph flow (guard → classify → retrieve → answer + grounding check) → FastAPI. An LLM provider interface starts with AWS Bedrock (the author has access); an OpenAI-compatible provider comes later. A separate eval harness measures every layer.
+
+Key design rules:
+- **For lineage answers, the LLM never writes the model list.** The list comes straight from the SQL traversal and is shown as a table; the LLM only writes the summary around it. A grounding check verifies the summary's model names, edge directions and counts against the query result.
+- Lineage is model-level only; column-level lineage needs SQL parsing (sqlglot, Phase 5).
+- Answers about owners must say where the owner came from (`owner_source`) and say when none is recorded.
+
+## Plan and status
+
+| Phase | Goal | Status |
+|---|---|---|
+| 0 | Starter kit: FastAPI, Postgres + pgvector, CI | Done |
+| 1 | Lineage MVP | In progress |
+| 2 | pgvector semantic search + question classifier | Planned |
+| 3 | Synthetic incidents, runbooks, Slack threads; hybrid retrieval | Planned |
+| 4 | Refresh on dbt deploy; second project (Snowflake); manifest diffing | Planned |
+| 5 | Experiments: pgvector vs. Pinecone, LLM providers, column-level lineage | Planned |
+| 6 | Hardening: auth, OpenTelemetry, deployment, eval in CI | Planned |
+
+Phase 1 steps:
+1. Project setup — done
+2. Get the dbt manifest (Cal-ITP) — done
+3. Schema, manifest parser, loader, owner rules — done
+4. **Next:** lineage queries — fuzzy name matching (pg_trgm), upstream/downstream recursive CTEs with a depth limit and cycle protection, tests against a real Postgres (add a Postgres service to CI)
+5. LLM provider interface (Bedrock) + lineage answer: fixed table from SQL + LLM summary + grounding check
+6. LangGraph flow (guard → lineage → answer → check) and `/api/ask`
+7. Eval v1: about 30 golden lineage questions generated from the manifest, a runner, a results report
+8. README update: architecture, quickstart, sample data with the Cal-ITP commit hash, first results
+
+## Evaluation approach
+
+Evaluate each layer separately: classifier accuracy, name resolution, lineage set precision/recall (must be 100%; a miss is a bug), recall@k for semantic and incident search, answer correctness, correct abstention on unanswerable questions, and hallucination rate per 100 lineage answers. Lineage ground truth is generated from the manifest. LLM-as-judge uses a different model family from the generator and is checked against hand labels.
+
+## Decision records
+
+- `0001` Postgres adjacency list + recursive CTEs for lineage, not a graph database
+- `0002` Read dbt artifacts; never import dbt
+- `0003` Path-based owner rules when dbt has no owners
