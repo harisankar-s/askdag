@@ -484,14 +484,14 @@ def _labels(items: Iterable[GoldenItem], index: NameIndex) -> dict[str, str]:
     return {uid: index.names[uid].display for uid in sorted(named)}
 
 
-def _describe_request(request: Mapping[str, str | int]) -> str:
+def describe_request(request: Mapping[str, str | int]) -> str:
     if "question" in request:
         return json.dumps(request["question"])
     fields = ("node", "direction", "depth", "choose")
     return " ".join(f"{key}={request[key]}" for key in fields if key in request)
 
 
-def _describe_expect(expect: Expect, labels: Mapping[str, str]) -> str:
+def describe_expect(expect: Expect, labels: Mapping[str, str]) -> str:
     if expect.kind == "lineage":
         text = f"lineage {labels[expect.node_id]} {expect.direction} {expect.depth}"
     elif expect.reason == "ambiguous":
@@ -523,7 +523,7 @@ def describe(golden: GoldenSet) -> str:
         lines.append(f"{item.id}  [{', '.join(item.tags)}]")
         for number, turn in enumerate(item.turns, start=1):
             prefix = f"{number} " if item.thread else ""
-            expected = _describe_expect(turn.expect, golden.labels)
+            expected = describe_expect(turn.expect, golden.labels)
             same = f" (same node: {turn.same_node})" if turn.same_node else ""
-            lines.append(f"    {prefix}{_describe_request(turn.request)} -> {expected}{same}")
+            lines.append(f"    {prefix}{describe_request(turn.request)} -> {expected}{same}")
     return "\n".join(lines)

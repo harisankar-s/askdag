@@ -40,6 +40,7 @@ curl -s localhost:8000/api/ask -H 'content-type: application/json' -d '{"questio
 uv run asklineage prune-threads --older-than-hours 24
 uv run asklineage eval conformance data/manifests/calitp/manifest.json
 uv run asklineage eval golden data/manifests/calitp/manifest.json
+uv run asklineage eval run data/manifests/calitp/manifest.json --source-repo data/raw/data-infra
 ```
 
 Stop `uvicorn --reload` before `uv add` or `uv sync`: the reloader watches `.venv`, restarts mid-install, and can leave port 8000 held by a dead worker, so requests hang instead of failing.
@@ -90,8 +91,8 @@ Phase 1 steps:
    - 6b done (ADR 0009; tested on Cal-ITP: typo → resumable clarification → choose → follow-up): opt-in threads (`start_thread` → server-issued `thread_id`, `ask_threads` table, 404/409), `PostgresSaver` on a second autocommit pool (`init-db` runs `setup()`), `begin` clears turn-scoped keys, `clarify` uses `interrupt()` and `choose` resumes it (choice must be a candidate), follow-ups via `same_node` reuse `previous`, `durability="exit"`, explicit serializer allowlist `STATE_TYPES`, `prune-threads`; flow tests use `InMemorySaver` with the same serializer
 7. **In progress:** Eval v1 (ADR 0010)
    - 7a ground truth + conformance: `eval/truth.py` (stdlib only, BFS over `depends_on`), `eval/conformance.py` (every node × both directions × depths 1, 2, 3, 5, 25: node set, fewest hops, edges, `truncated`; refuses a stale load), `asklineage eval conformance`; CI runs it on `tests/synthetic_manifest.py` (seeded, about 170 nodes) with a mutation test — done; Cal-ITP: 8,650 walks, 0 mismatches, 8.7 s
-   - 7b.1 golden question set (`eval/golden.py`, `eval/templates.py`, `asklineage eval golden`): generated at run time, never committed; role-based node selection, expected outcomes from the manifest and ADR 0004's exact-name rule, phrasing seeded per item id, set sha; about 46 items / 56 turns — written, Cal-ITP review pending
-   - 7b.2 scorers per layer, runner with `LLM_PROVIDER=none` (threads on `InMemorySaver`), report under `data/eval/runs/` (git-ignored)
+   - 7b.1 golden question set (`eval/golden.py`, `eval/templates.py`, `asklineage eval golden`): generated at run time, never committed; role-based node selection, expected outcomes from the manifest and ADR 0004's exact-name rule, phrasing seeded per item id, set sha; about 46 items / 56 turns — done; reviewed on Cal-ITP (a follow-up with no depth keeps the previous depth, confirmed)
+   - 7b.2 `eval/score.py` (one outcome per turn: correct, acceptable, safe_wrong, silent_wrong, blocked, error; the answer's own walk is always checked against the manifest), `eval/run.py` (`run_ask` per turn, threads on `InMemorySaver`, warm-up parse, run metadata), `eval/report.py` (per-layer summary, counts with % only from 20 turns), `asklineage eval run` (exits 1 on lineage, facts or error bugs) writing `data/eval/runs/<time>-<model>/` — written, Cal-ITP run pending
    - 7c qwen2.5:7b run: parse, follow-ups, highlight grounding and usefulness vs a code baseline, latency and tokens; numbers into ADR 0010
    - 7d (optional) hand labels to check the usefulness proxy
 8. README update: architecture, quickstart, sample data with the Cal-ITP commit hash, first results

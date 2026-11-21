@@ -26,7 +26,9 @@ from asklineage.eval.conformance import (
     loaded_owners,
     run_conformance,
 )
-from asklineage.eval.golden import PHRASINGS, GoldenSetError, build_golden, describe
+from asklineage.eval.golden import PHRASINGS, GoldenSetError, NameIndex, build_golden, describe
+from asklineage.eval.report import render, summarize
+from asklineage.eval.run import EvalContext, run_golden, run_info, write_run
 from asklineage.eval.truth import truth_graph
 from asklineage.ingest.load import apply_schema, load_manifest
 from asklineage.ingest.manifest import UnsupportedManifestError, parse_manifest
@@ -81,6 +83,15 @@ def main(argv: list[str] | None = None) -> None:
     golden.add_argument("manifest", type=Path, help="the manifest that was loaded")
     golden.add_argument("--phrasings", choices=PHRASINGS, default="one")
     golden.add_argument("--json", type=Path, dest="json_path", help="also write the set here")
+    run = evals.add_parser("run", help="Ask the golden set and score every layer")
+    run.add_argument("manifest", type=Path, help="the manifest that was loaded")
+    run.add_argument("--phrasings", choices=PHRASINGS, default="one")
+    run.add_argument("--out", type=Path, default=Path("data/eval/runs"), help="runs folder")
+    run.add_argument(
+        "--source-repo",
+        type=Path,
+        help="checkout the manifest was built from, to record its commit",
+    )
     args = parser.parse_args(argv)
     if args.command == "lineage" and not 1 <= args.depth <= MAX_DEPTH:
         parser.error(f"--depth must be between 1 and {MAX_DEPTH}")
@@ -109,6 +120,8 @@ def main(argv: list[str] | None = None) -> None:
             _show_lineage(conn, args)
         elif args.command == "eval" and args.eval_command == "golden":
             _eval_golden(conn, args)
+        elif args.command == "eval" and args.eval_command == "run":
+            _eval_run(conn, args)
         elif args.command == "eval":
             _eval_conformance(conn, args)
         else:
@@ -178,6 +191,55 @@ def _eval_golden(conn: psycopg.Connection, args: argparse.Namespace) -> None:
         args.json_path.parent.mkdir(parents=True, exist_ok=True)
         args.json_path.write_text(json.dumps(golden.to_dict(), indent=2, sort_keys=True))
         print(f"Wrote {args.json_path}")
+
+
+def _eval_run(conn: psycopg.Connection, args: argparse.Namespace) -> None:
+    raw = args.manifest.read_bytes()
+    manifest = json.loads(raw)
+    graph = truth_graph(manifest)
+    settings = get_settings()
+    provider = get_provider(settings)
+    try:
+        check_loaded(conn, graph)
+        owners = loaded_owners(conn, graph.project_name)
+        golden = build_golden(manifest, graph, owners, args.phrasings)
+    except (StaleLoadError, GoldenSetError) as exc:
+        print(exc)
+        raise SystemExit(1) from exc
+    info = run_info(
+        args.manifest,
+        raw,
+        golden,
+        llm_provider=settings.llm_provider,
+        llm_model=settings.llm_model if provider else None,
+        max_named=settings.llm_max_named_nodes,
+        source_repo=args.source_repo,
+    )
+    context = EvalContext(
+        conn, provider, graph, NameIndex(manifest, graph), owners, settings.llm_max_named_nodes
+    )
+    total = sum(len(item.turns) for item in golden.items)
+    print(
+        f"Asking golden set {golden.sha}: {len(golden.items)} items, {total} turns, "
+        f"{info.llm_model or 'no LLM'}"
+    )
+    done = iter(range(1, total + 1))
+
+    def progress(score) -> None:
+        print(f"  [{next(done):>3}/{total}] {score.item_id} turn {score.turn}: {score.outcome}")
+
+    scores = run_golden(context, golden, on_turn=progress)
+    summary = summarize(scores, llm=provider is not None)
+    run_dir = write_run(
+        args.out, info, golden, scores, summary, render(info, golden, summary, scores)
+    )
+
+    outcomes = Counter(score.outcome for score in scores)
+    print(f"Outcomes: {dict(outcomes)}; silent wrong per 100: {summary['silent_wrong_per_100']}")
+    print(f"Report: {run_dir / 'report.md'}")
+    if summary["bugs"]:
+        print(f"Bugs (errors, or tables or facts unlike the manifest): {summary['bugs']}")
+        raise SystemExit(1)
 
 
 def _eval_conformance(conn: psycopg.Connection, args: argparse.Namespace) -> None:
