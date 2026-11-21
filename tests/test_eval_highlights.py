@@ -94,9 +94,11 @@ def test_one_team_picks_score_below_the_code_baseline(
 
 
 def test_attempt_info_keeps_the_rule_of_each_violation() -> None:
-    attempt = Attempt(violations=(Violation(1, "no_such_edge", "a does not feed b"),))
+    violation = Violation(1, "no_such_edge", "a does not feed b")
+    attempt = Attempt(violations=(violation,), reply='{"claims": []}')
     info = AttemptInfo.from_attempt("highlights", attempt)
     assert info.rules == ["no_such_edge"]
+    assert info.reply == '{"claims": []}'
     assert info.violations == ["claim 1: a does not feed b"]
 
 

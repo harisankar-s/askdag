@@ -378,6 +378,9 @@ def render(info: RunInfo, golden: GoldenSet, summary: dict, scores: Sequence[Tur
             f"{describe_request(score.request)} → expected {expected}; got {_got(score)}. "
             f"{'; '.join(score.problems)}"
         )
+        for number, attempt in enumerate(a for a in score.attempts if a["stage"] == "parse"):
+            if attempt.get("reply"):
+                lines.append(f"  - parse attempt {number + 1} said: `{attempt['reply']}`")
     if len(failures) > MAX_FAILURES_SHOWN:
         lines.append(f"- … {len(failures) - MAX_FAILURES_SHOWN} more in results.jsonl")
     blocked = [f"{s.item_id} turn {s.turn}" for s in scores if s.outcome == "blocked"]
