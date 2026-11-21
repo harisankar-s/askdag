@@ -1,0 +1,19 @@
+# Synthetic ownership for the Cal-ITP sample project.
+# Cal-ITP records no owners in dbt, so these team names are made up for the demo.
+# The first matching rule wins. "*" also matches "/", so "models/*/gtfs*" covers every layer.
+# Folders not listed here (amplitude, kuba, hqta, audit, utils, ...) are deliberately unowned.
+rules:
+  - path: "models/*/gtfs*"
+    owner: gtfs-team
+  - path: "models/*/ntd*"
+    owner: ntd-reporting-team
+  - path: "models/*/payments*"
+    owner: payments-team
+  - path: "models/*/benefits*"
+    owner: payments-team
+  - path: "models/*/transit_database*"
+    owner: transit-database-team
+  - path: "models/*/tides*"
+    owner: tides-team
+  - path: "seeds/*"
+    owner: data-platform-team

@@ -1,0 +1,11 @@
+# Placeholder BigQuery profile so `dbt parse` can run without warehouse access.
+# The top-level key must match the `profile:` value in the project's dbt_project.yml.
+calitp_warehouse:
+  target: parse
+  outputs:
+    parse:
+      type: bigquery
+      method: oauth
+      project: placeholder-project
+      dataset: placeholder
+      threads: 1
