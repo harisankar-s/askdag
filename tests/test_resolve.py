@@ -1,7 +1,13 @@
 import pytest
 from helpers import TEST_PROJECT, make_node
 
-from asklineage.lineage.resolve import Ambiguous, NotFound, Resolved, resolve_node
+from asklineage.lineage.resolve import (
+    Ambiguous,
+    NotFound,
+    Resolved,
+    node_display_names,
+    resolve_node,
+)
 
 RAW_ORDERS = make_node("orders", "source", source_name="raw")
 ORDERS = make_node("orders")
@@ -63,3 +69,9 @@ def test_project_filter_excludes_other_projects(conn) -> None:
     assert resolve_node(conn, "fct_orders", project="some_other_project") == NotFound(
         "fct_orders", ()
     )
+
+
+def test_display_names_cover_every_node_with_sources_qualified(conn) -> None:
+    names = node_display_names(conn, project=TEST_PROJECT)
+
+    assert names == {"raw.orders", "orders", "stg_orders", "fct_orders"}

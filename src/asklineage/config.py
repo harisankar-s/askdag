@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from asklineage.llm.openai_compatible import ResponseFormat
@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr = SecretStr("ollama")
     llm_timeout_seconds: float = 60.0
     llm_response_format: ResponseFormat = "json_schema"
+    # How many node names the summary prompt may list; counts always cover every node.
+    llm_max_named_nodes: int = Field(default=20, ge=1, le=500)
 
 
 @lru_cache

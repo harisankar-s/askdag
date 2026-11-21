@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import textwrap
 from collections import Counter
 from pathlib import Path
 
@@ -9,12 +10,22 @@ import psycopg
 from psycopg.rows import dict_row
 from pydantic import BaseModel
 
+from asklineage.answer.claims import Highlights
+from asklineage.answer.generate import Attempt
+from asklineage.answer.lineage_answer import HighlightStatus, LineageAnswer, answer_lineage
 from asklineage.config import get_settings
 from asklineage.ingest.load import apply_schema, load_manifest
 from asklineage.ingest.manifest import UnsupportedManifestError, parse_manifest
 from asklineage.ingest.owners import load_owner_rules
 from asklineage.lineage.graph import DEFAULT_DEPTH, MAX_DEPTH, Direction, Lineage, lineage
-from asklineage.lineage.resolve import Ambiguous, NotFound, Resolved, resolve_node
+from asklineage.lineage.resolve import (
+    Ambiguous,
+    Candidate,
+    NotFound,
+    Resolved,
+    node_display_names,
+    resolve_node,
+)
 from asklineage.llm.base import LLMError
 from asklineage.llm.factory import get_provider
 
@@ -33,6 +44,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     show.add_argument("--depth", type=int, default=DEFAULT_DEPTH, help=f"1 to {MAX_DEPTH} hops")
     show.add_argument("--project", help="only match nodes in this dbt project")
+    show.add_argument(
+        "--summarize", action="store_true", help="add a summary, checked against the result"
+    )
+    show.add_argument(
+        "-v", "--verbose", action="store_true", help="with --summarize, show each LLM attempt"
+    )
     commands.add_parser("llm-check", help="Send one small request to the configured LLM")
     args = parser.parse_args(argv)
     if args.command == "lineage" and not 1 <= args.depth <= MAX_DEPTH:
@@ -102,7 +119,10 @@ def _load_manifest(
 def _show_lineage(conn: psycopg.Connection, args: argparse.Namespace) -> None:
     match resolve_node(conn, args.name, args.project):
         case Resolved(node=node):
-            _print_lineage(lineage(conn, node.unique_id, args.direction, args.depth))
+            result = lineage(conn, node.unique_id, args.direction, args.depth)
+            if args.summarize:
+                print(_summarize(conn, result, node, args))
+            _print_lineage(result)
         case Ambiguous(candidates=candidates):
             print(f"{args.name!r} matches {len(candidates)} nodes; pass one of these unique_ids:")
             for candidate in candidates:
@@ -115,6 +135,76 @@ def _show_lineage(conn: psycopg.Connection, args: argparse.Namespace) -> None:
                 for candidate in suggestions:
                     print(f"  {candidate.score:.2f}  {candidate.unique_id}")
             raise SystemExit(1)
+
+
+def _summarize(
+    conn: psycopg.Connection, result: Lineage, root: Candidate, args: argparse.Namespace
+) -> str:
+    settings = get_settings()
+    answer = answer_lineage(
+        result,
+        root,
+        get_provider(settings),
+        max_named=settings.llm_max_named_nodes,
+        known_names=node_display_names(conn, args.project),
+    )
+    return format_summary(answer, verbose=args.verbose)
+
+
+def _wrap(text: str, first: str, rest: str) -> str:
+    return textwrap.fill(
+        text, width=100, initial_indent=first, subsequent_indent=rest, break_on_hyphens=False
+    )
+
+
+def format_summary(answer: LineageAnswer, verbose: bool = False) -> str:
+    attempts = answer.attempts
+    latency = sum(a.latency_ms or 0 for a in attempts)
+    model = next((a.model for a in attempts if a.model), None)
+    lines = ["Summary", _wrap(answer.summary, "  ", "  ")]
+    match answer.status:
+        case HighlightStatus.PASSED:
+            lines.append(f"Highlights (grounded: {model}, {latency} ms)")
+        case HighlightStatus.PASSED_AFTER_RETRY:
+            lines.append(
+                f"Highlights (grounded on retry: {model}, {len(attempts)} attempts, {latency} ms)"
+            )
+        case HighlightStatus.REJECTED if attempts and attempts[-1].error:
+            lines.append("Highlights: none (the LLM could not be reached)")
+        case HighlightStatus.REJECTED:
+            hint = "" if verbose else "; run with --verbose to see why"
+            lines.append(f"Highlights: none (rejected by the check {len(attempts)} times{hint})")
+        case HighlightStatus.OFF:
+            lines.append("Highlights: off (no LLM configured)")
+        case HighlightStatus.SKIPPED:
+            pass
+    lines += [_wrap(text, "  - ", "    ") for text in answer.highlight_texts]
+    if verbose:
+        lines += _describe_attempts(attempts)
+    return "\n".join(lines) + "\n"
+
+
+def _describe_attempts(attempts: tuple[Attempt, ...]) -> list[str]:
+    lines = []
+    for number, attempt in enumerate(attempts, start=1):
+        if attempt.error:
+            lines.append(f"  attempt {number}: error: {attempt.error}")
+            continue
+        count = len(attempt.violations)
+        outcome = "passed" if attempt.passed else f"{count} problem{'' if count == 1 else 's'}"
+        if attempt.model is None:
+            details = "reply was not valid JSON for the schema"
+        else:
+            details = f"{attempt.model}, {attempt.latency_ms} ms"
+            if attempt.input_tokens is not None:
+                details += f", {attempt.input_tokens} in / {attempt.output_tokens} out tokens"
+        lines.append(f"  attempt {number}: {outcome} ({details})")
+        for violation in attempt.violations:
+            lines.append(f"    - {violation}")
+            if violation.claim and isinstance(attempt.output, Highlights):
+                said = attempt.output.claims[violation.claim - 1].text
+                lines.append(f"      said: {said!r}")
+    return lines
 
 
 def _print_lineage(result: Lineage) -> None:

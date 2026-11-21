@@ -32,6 +32,13 @@ FUZZY = """
 """
 
 
+DISPLAY_NAMES = """
+    SELECT CASE WHEN source_name IS NULL THEN name ELSE source_name || '.' || name END AS name
+    FROM nodes
+    WHERE %(project)s::text IS NULL OR project_name = %(project)s
+"""
+
+
 @dataclass(frozen=True)
 class Candidate:
     unique_id: str
@@ -39,6 +46,10 @@ class Candidate:
     resource_type: str
     source_name: str | None
     score: float
+
+    @property
+    def display_name(self) -> str:
+        return f"{self.source_name}.{self.name}" if self.source_name else self.name
 
 
 @dataclass(frozen=True)
@@ -80,3 +91,10 @@ def resolve_node(conn: psycopg.Connection, query: str, project: str | None = Non
 
         cur.execute(FUZZY, {"q": q, "project": project, "limit": MAX_SUGGESTIONS})
         return NotFound(q, tuple(Candidate(**row) for row in cur.fetchall()))
+
+
+def node_display_names(conn: psycopg.Connection, project: str | None = None) -> frozenset[str]:
+    """Every node's display name, so a summary that mentions a real node unmarked can be caught."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(DISPLAY_NAMES, {"project": project})
+        return frozenset(row["name"] for row in cur.fetchall())

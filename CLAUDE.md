@@ -31,6 +31,7 @@ uv run ruff format . && uv run ruff check . && uv run pytest
 uv run asklineage init-db
 uv run asklineage load-manifest data/manifests/calitp/manifest.json --owners config/owners.calitp.yml
 uv run asklineage lineage dim_schedule_feeds --direction downstream --depth 2
+uv run asklineage lineage dim_schedule_feeds --direction downstream --depth 2 --summarize -v
 uv run python scripts/manifest_stats.py data/manifests/calitp/manifest.json
 uv run asklineage llm-check
 ```
@@ -49,7 +50,7 @@ uv run asklineage llm-check
 Sources (dbt manifests, model descriptions, incident docs) → ingestion (manifest parser, chunk and embed, incident loader) → Postgres + pgvector (lineage tables, vector chunks, incidents) → LangGraph flow (guard → classify → retrieve → answer + grounding check) → FastAPI. The LLM sits behind a narrow provider interface (`llm/base.py`). `LLM_PROVIDER=none` (the default) uses a template summary so a fresh clone needs no model; the first real adapter is OpenAI-compatible (local Ollama `qwen2.5:7b` for testers; any compatible gateway for enterprises). The author has no Bedrock account; a native Bedrock adapter is optional and later. A separate eval harness measures every layer.
 
 Key design rules:
-- **For lineage answers, the LLM never writes the model list.** The list comes straight from the SQL traversal and is shown as a table; the LLM only writes the summary around it. A grounding check verifies the summary's model names, edge directions and counts against the query result.
+- **For lineage answers, code writes the facts; the LLM only adds highlights.** The table and the summary paragraph (counts, teams affected, `owner_source`, unowned, truncation) come from the SQL result. The LLM may add 1–3 relation highlights, each checked in code (edge or path exists in the stated direction, names, no numbers, no owner wording; code adds owner tags); failing highlights are dropped after one retry. Compute what is computable; generate only what needs language (ADR 0007).
 - Lineage is model-level only; column-level lineage needs SQL parsing (sqlglot, Phase 5).
 - Answers about owners must say where the owner came from (`owner_source`) and say when none is recorded.
 
@@ -70,13 +71,13 @@ Phase 1 steps:
 2. Get the dbt manifest (Cal-ITP) — done
 3. Schema, manifest parser, loader, owner rules — done
 4. Lineage queries — exact-or-candidates name resolution (pg_trgm suggestions), depth-bounded upstream/downstream CTE with `truncated` flag, `asklineage lineage` CLI, Postgres tests + CI service — done
-5. **In progress:** LLM provider interface + lineage answer: fixed table from SQL + LLM summary + grounding check
+5. LLM provider interface + lineage answer: fixed table from SQL + LLM summary + grounding check
    - 5a provider Protocol, `ScriptedProvider`, LLM settings, ADR 0006 — done
    - 5b OpenAI-compatible adapter + provider factory + `asklineage llm-check` (adds `openai`; openai 3.x runs on `httpx2`, so adapter tests mock with `httpx2.MockTransport`) — done
-   - 5c `LineageFacts` (pure) + claims schema + prompt
-   - 5d grounding check (pure) + template fallback; one retry, then template; ADR 0007
-   - 5e `lineage --summarize` CLI
-6. LangGraph flow (guard → lineage → answer → check) and `/api/ask`
+   - 5c `LineageFacts` (pure; counts cover every node, names capped by `LLM_MAX_NAMED_NODES`) + claims schema + prompt — done
+   - 5d grounding check (pure) + template + reusable `generate_checked` loop (`answer/generate.py`); ADR 0007 — done
+   - 5e `lineage --summarize [-v]` CLI — done. Redesigned to option B after three Cal-ITP runs; run 4 moved owners out of LLM text into code-added tags (ADR 0007 has the history and the A/B/C/D comparison); run 5: both directions grounded on the first attempt (highlights true but not yet well chosen; eval in Step 7)
+6. **Next:** LangGraph flow (guard → lineage → answer → check) and `/api/ask`
 7. Eval v1: about 30 golden lineage questions generated from the manifest, a runner, a results report
 8. README update: architecture, quickstart, sample data with the Cal-ITP commit hash, first results
 
@@ -92,3 +93,4 @@ Evaluate each layer separately: classifier accuracy, name resolution, lineage se
 - `0004` Name resolution returns candidates; a fuzzy match never answers
 - `0005` Bounded traversal: depth cap + per-level dedup, not path tracking
 - `0006` Narrow LLM provider interface; OpenAI-compatible first; `none` by default
+- `0007` Code writes the lineage facts; the LLM adds checked relation highlights; generic retry loop
