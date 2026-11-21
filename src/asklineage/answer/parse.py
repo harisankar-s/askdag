@@ -218,6 +218,25 @@ def parse_question(
     )
 
 
+def keep_first_reading(
+    generated: Generated[ParsedQuestion], final: ParsedQuestion
+) -> ParsedQuestion:
+    """A retry may change only what it was told to fix.
+
+    Code can't check direction or depth against the question, so a retry that changes them
+    passes unseen; on Cal-ITP, qwen2.5:7b flipped a right direction while fixing the name
+    (ADR 0010). Keep them from the first reading unless the first was flagged for them.
+    """
+    first = generated.attempts[0].output if generated.attempts else None
+    if not isinstance(first, ParsedQuestion) or first is final:
+        return final
+    flagged = {violation.rule for violation in generated.attempts[0].violations}
+    update = {"depth": first.depth}
+    if "missing_direction" not in flagged:
+        update["direction"] = first.direction
+    return final.model_copy(update=update)
+
+
 def recover_reading(generated: Generated[ParsedQuestion], question: str) -> ParsedQuestion | None:
     """Take the name from the question when the model's copy of it was the only problem.
 

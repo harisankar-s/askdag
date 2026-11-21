@@ -152,6 +152,19 @@ def test_a_follow_up_that_names_another_node_cannot_claim_the_previous_one(conn,
     assert answer.attempts[0].rules == ["same_node_names_another_node"]
 
 
+def test_a_retry_that_fixes_the_name_cannot_flip_the_direction(conn, threads):
+    thread_id = uuid4()
+    claimed = parse_reply(entity=None, direction="downstream", same_node=True)
+    flipped = parse_reply("fct_orders", direction="upstream")
+    provider = ScriptedProvider([claimed, flipped, LLMError("down")])
+
+    turn(conn, threads, thread_id, node="stg_orders", direction="upstream")
+    answer = turn(conn, threads, thread_id, provider, question="And what does fct_orders feed?")
+
+    assert answer.node.unique_id == FCT_ORDERS.unique_id
+    assert answer.direction == Direction.DOWNSTREAM
+
+
 def test_a_follow_up_about_another_node_keeps_direction_and_depth(conn, threads):
     thread_id = uuid4()
     provider = ScriptedProvider([parse_reply("fct_orders", direction=None), LLMError("down")])

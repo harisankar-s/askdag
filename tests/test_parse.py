@@ -9,6 +9,7 @@ from asklineage.answer.parse import (
     check_parse,
     clean_entity,
     entity_in_question,
+    keep_first_reading,
     name_tokens,
     parse_question,
     recover_reading,
@@ -79,6 +80,25 @@ def test_a_name_the_model_corrected_is_taken_from_the_question():
     attempt = Attempt(violations=tuple(check_parse(corrected, question)), output=corrected)
 
     assert recover_reading(Generated(None, (attempt,)), question).entity == "stg_ordrs"
+
+
+def test_a_retry_keeps_the_first_direction_and_depth_unless_they_were_flagged():
+    first = parsed(entity=None, direction=Direction.DOWNSTREAM, depth=2, same_node=True)
+    retry = parsed("fct_orders", direction=Direction.UPSTREAM, depth=4)
+    named = Violation(None, "same_node_names_another_node", "x")
+    missing = Violation(None, "missing_direction", "x")
+
+    kept = keep_first_reading(Generated(retry, (Attempt((named,), output=first),)), retry)
+    fixed = keep_first_reading(Generated(retry, (Attempt((missing,), output=first),)), retry)
+
+    assert (kept.entity, kept.same_node, kept.direction, kept.depth) == (
+        "fct_orders",
+        False,
+        Direction.DOWNSTREAM,
+        2,
+    )
+    assert (fixed.direction, fixed.depth) == (Direction.UPSTREAM, 2)
+    assert keep_first_reading(Generated(first, (Attempt(output=first),)), first) is first
 
 
 def test_no_recovery_with_two_names_other_problems_or_an_error():

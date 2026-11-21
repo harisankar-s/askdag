@@ -26,6 +26,7 @@ from asklineage.answer.lineage_answer import HighlightStatus, answer_lineage
 from asklineage.answer.parse import (
     PreviousQuestion,
     clean_entity,
+    keep_first_reading,
     parse_question,
     recover_reading,
 )
@@ -194,6 +195,8 @@ def parse(state: AskState, runtime: Runtime[AskContext]) -> AskState:
     generated = parse_question(provider, question, asked_before, known)
     attempts = [AttemptInfo.from_attempt("parse", a) for a in generated.attempts]
     parsed = generated.output or recover_reading(generated, question)
+    if parsed is not None:
+        parsed = keep_first_reading(generated, parsed)
     if parsed is None:
         reason = "llm_unavailable" if generated.attempts[-1].error else "not_understood"
         return {"abstain_reason": reason, "attempts": attempts}
