@@ -24,6 +24,7 @@
         "order_id": {"name": "order_id", "description": "Order key.", "data_type": null},
         "status": {"name": "status", "description": "", "data_type": null}
       },
+      "depends_on": {"macros": [], "nodes": ["source.shop.raw.orders"]},
       "raw_code": "select * from {{ source('raw', 'orders') }}"
     },
     "model.shop.fct_orders": {
@@ -40,6 +41,7 @@
       "config": {"materialized": "table", "meta": {"owner": "finance-team"}},
       "meta": {},
       "columns": {},
+      "depends_on": {"macros": [], "nodes": ["model.shop.stg_orders"]},
       "raw_code": "select * from {{ ref('stg_orders') }}"
     },
     "model.shop.dim_customers": {
@@ -57,6 +59,7 @@
       "config": {"materialized": "table", "meta": {}},
       "meta": {},
       "columns": {},
+      "depends_on": {"macros": [], "nodes": ["model.shop.stg_orders", "seed.shop.country_codes"]},
       "raw_code": "select * from {{ ref('stg_orders') }} join {{ ref('country_codes') }}"
     },
     "seed.shop.country_codes": {
@@ -71,6 +74,7 @@
       "original_file_path": "seeds/country_codes.csv",
       "tags": [],
       "config": {"materialized": "seed", "meta": {}},
+      "depends_on": {"macros": [], "nodes": []},
       "meta": {},
       "columns": {}
     },
@@ -81,6 +85,7 @@
       "package_name": "shop",
       "column_name": "order_id",
       "attached_node": "model.shop.stg_orders",
+      "depends_on": {"macros": [], "nodes": ["model.shop.stg_orders"]},
       "test_metadata": {"name": "not_null"},
       "config": {"severity": "ERROR"}
     },
@@ -91,6 +96,7 @@
       "package_name": "shop",
       "column_name": null,
       "attached_node": "source.shop.missing.table",
+      "depends_on": {"macros": [], "nodes": []},
       "test_metadata": {"name": "custom_check"},
       "config": {"severity": "WARN"}
     }

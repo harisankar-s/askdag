@@ -3,6 +3,7 @@
 import argparse
 import json
 import textwrap
+import time
 from collections import Counter
 from datetime import timedelta
 from pathlib import Path
@@ -18,6 +19,8 @@ from asklineage.answer.lineage_answer import HighlightStatus, LineageAnswer, ans
 from asklineage.api.flow import checkpoint_serde
 from asklineage.api.threads import prune_threads
 from asklineage.config import get_settings
+from asklineage.eval.conformance import DEPTHS, StaleLoadError, run_conformance
+from asklineage.eval.truth import truth_graph
 from asklineage.ingest.load import apply_schema, load_manifest
 from asklineage.ingest.manifest import UnsupportedManifestError, parse_manifest
 from asklineage.ingest.owners import load_owner_rules
@@ -57,9 +60,21 @@ def main(argv: list[str] | None = None) -> None:
     commands.add_parser("llm-check", help="Send one small request to the configured LLM")
     prune = commands.add_parser("prune-threads", help="Delete /api/ask threads unused for a while")
     prune.add_argument("--older-than-hours", type=float, default=24.0)
+    evaluate = commands.add_parser("eval", help="Measure asklineage against a manifest")
+    evals = evaluate.add_subparsers(dest="eval_command", required=True)
+    conformance = evals.add_parser(
+        "conformance", help="Check every lineage walk against a BFS over manifest.json"
+    )
+    conformance.add_argument("manifest", type=Path, help="the manifest that was loaded")
+    conformance.add_argument(
+        "--depths", type=int, nargs="+", default=list(DEPTHS), help="depths to walk at"
+    )
+    conformance.add_argument("--show", type=int, default=20, help="mismatches to print")
     args = parser.parse_args(argv)
     if args.command == "lineage" and not 1 <= args.depth <= MAX_DEPTH:
         parser.error(f"--depth must be between 1 and {MAX_DEPTH}")
+    if args.command == "eval" and not all(1 <= depth <= MAX_DEPTH for depth in args.depths):
+        parser.error(f"--depths must be between 1 and {MAX_DEPTH}")
     if args.command == "llm-check":
         _check_llm()
         return
@@ -80,6 +95,8 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Pruned {pruned} thread(s) unused for {args.older_than_hours:g} hours or more.")
         elif args.command == "lineage":
             _show_lineage(conn, args)
+        elif args.command == "eval":
+            _eval_conformance(conn, args)
         else:
             _load_manifest(conn, args, parser)
 
@@ -130,6 +147,36 @@ def _load_manifest(
     print(f"  columns  {len(parsed.columns):>6}")
     print(f"  tests    {len(parsed.tests):>6}  ({unattached} not attached to a node)")
     print(f"  owners   {dict(owner_sources)}")
+
+
+def _eval_conformance(conn: psycopg.Connection, args: argparse.Namespace) -> None:
+    graph = truth_graph(json.loads(args.manifest.read_text()))
+    started = time.perf_counter()
+    try:
+        report = run_conformance(conn, graph, sorted(set(args.depths)))
+    except StaleLoadError as exc:
+        print(exc)
+        raise SystemExit(1) from exc
+    seconds = time.perf_counter() - started
+
+    depths = ", ".join(str(depth) for depth in report.depths)
+    print(f"Conformance of {report.project} against {args.manifest}")
+    print(f"  manifest    {report.nodes:>6} nodes, {report.edges} edges")
+    print(
+        f"  walks       {report.walks:>6}  ({report.roots} roots x 2 directions x depths "
+        f"{depths}) in {seconds:.1f} s"
+    )
+    if report.passed:
+        print("  mismatches       0  every walk matches the manifest")
+        return
+    rules = Counter(mismatch.rule for mismatch in report.mismatches)
+    print(f"  mismatches  {len(report.mismatches):>6}  {dict(rules)}")
+    for mismatch in report.mismatches[: args.show]:
+        print(f"    - {mismatch}")
+    hidden = len(report.mismatches) - args.show
+    if hidden > 0:
+        print(f"    ... {hidden} more; raise --show to see them")
+    raise SystemExit(1)
 
 
 def _show_lineage(conn: psycopg.Connection, args: argparse.Namespace) -> None:

@@ -16,7 +16,7 @@ The author is a data engineering architect building this to learn enterprise RAG
 ## Stack and conventions
 
 - Python 3.12, uv (`uv add`, `uv sync`, `uv run`), FastAPI, psycopg 3 with a connection pool, Postgres 17 + pgvector in `docker-compose.yml`. LangGraph orchestrates `/api/ask` (graph runtime only, no LangChain models; ADR 0008).
-- Layout: `src/asklineage/` (package), `tests/`, `scripts/`, `config/`, `docs/decisions/`, `tools/dbt/`.
+- Layout: `src/asklineage/` (package; `eval/` holds the eval harness), `tests/`, `scripts/`, `config/`, `docs/decisions/`, `tools/dbt/`.
 - Ruff for lint and format (line length 100); CI runs `ruff check`, `ruff format --check` and `pytest` (`.github/workflows/ci.yml`).
 - Keep parsing pure (no database) so it's unit-testable with `tests/fixtures/mini_manifest.json`; database writes live in `ingest/load.py`.
 - `src/asklineage/sql/schema.sql` is idempotent (`IF NOT EXISTS`) and applied by `asklineage init-db`. Changing an existing column needs a manual migration; say so when it comes up.
@@ -38,6 +38,7 @@ uv run uvicorn asklineage.main:app --reload
 curl -s localhost:8000/api/ask -H 'content-type: application/json' -d '{"node": "dim_schedule_feeds"}'
 curl -s localhost:8000/api/ask -H 'content-type: application/json' -d '{"question": "What depends on dim_schedule_feeds?", "start_thread": true}'
 uv run asklineage prune-threads --older-than-hours 24
+uv run asklineage eval conformance data/manifests/calitp/manifest.json
 ```
 
 Stop `uvicorn --reload` before `uv add` or `uv sync`: the reloader watches `.venv`, restarts mid-install, and can leave port 8000 held by a dead worker, so requests hang instead of failing.
@@ -86,7 +87,11 @@ Phase 1 steps:
 6. LangGraph flow and `/api/ask` (ADR 0008)
    - 6a done (158 tests; first Cal-ITP runs in ADR 0008): stateless graph (`api/flow.py`): `parse` (LLM reads the question; entity must appear in it as a whole name) or `read_fields` (structured, works with `LLM_PROVIDER=none`) → `resolve` → `lineage` → `answer`, with `abstain` and `clarify` branches; `POST /api/ask` returns `kind` = lineage | clarification | abstain, attempts tagged by stage
    - 6b done (ADR 0009; tested on Cal-ITP: typo → resumable clarification → choose → follow-up): opt-in threads (`start_thread` → server-issued `thread_id`, `ask_threads` table, 404/409), `PostgresSaver` on a second autocommit pool (`init-db` runs `setup()`), `begin` clears turn-scoped keys, `clarify` uses `interrupt()` and `choose` resumes it (choice must be a candidate), follow-ups via `same_node` reuse `previous`, `durability="exit"`, explicit serializer allowlist `STATE_TYPES`, `prune-threads`; flow tests use `InMemorySaver` with the same serializer
-7. **Next:** Eval v1: about 30 golden lineage questions generated from the manifest, a runner, a results report
+7. **In progress:** Eval v1 (ADR 0010)
+   - 7a ground truth + conformance: `eval/truth.py` (stdlib only, BFS over `depends_on`), `eval/conformance.py` (every node × both directions × depths 1, 2, 3, 5, 25: node set, fewest hops, edges, `truncated`; refuses a stale load), `asklineage eval conformance`; CI runs it on `tests/synthetic_manifest.py` (seeded, about 170 nodes) with a mutation test — done; Cal-ITP: 8,650 walks, 0 mismatches, 8.7 s
+   - 7b golden question set generated at run time (committed templates, role-based selection, nothing from Cal-ITP committed), scorers per layer, runner with `LLM_PROVIDER=none`, report
+   - 7c qwen2.5:7b run: parse, follow-ups, highlight grounding and usefulness vs a code baseline, latency and tokens; numbers into ADR 0010
+   - 7d (optional) hand labels to check the usefulness proxy
 8. README update: architecture, quickstart, sample data with the Cal-ITP commit hash, first results
 
 ## Evaluation approach
@@ -104,3 +109,4 @@ Evaluate each layer separately: classifier accuracy, name resolution, lineage se
 - `0007` Code writes the lineage facts; the LLM adds checked relation highlights; generic retry loop
 - `0008` LangGraph orchestrates `/api/ask` (for 6b checkpoints and Phase 3 loops, and to learn it); plain functions would do for 6a
 - `0009` Conversation threads: opt-in, server-issued IDs, Postgres checkpoints, turn-scoped state reset, `interrupt()` clarifications, follow-ups, locks and pruning
+- `0010` Eval v1: exhaustive lineage conformance against an independent stdlib BFS over `depends_on`; synthetic manifest in CI; question set per layer (7b–7d)
