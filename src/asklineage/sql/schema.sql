@@ -1,3 +1,5 @@
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 CREATE TABLE IF NOT EXISTS manifest_loads (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     project_name text NOT NULL,
@@ -31,6 +33,7 @@ CREATE TABLE IF NOT EXISTS nodes (
 
 CREATE INDEX IF NOT EXISTS nodes_project_idx ON nodes (project_name);
 CREATE INDEX IF NOT EXISTS nodes_name_idx ON nodes (name);
+CREATE INDEX IF NOT EXISTS nodes_name_trgm_idx ON nodes USING gin (name gin_trgm_ops);
 
 CREATE TABLE IF NOT EXISTS lineage_edges (
     parent_id text NOT NULL REFERENCES nodes (unique_id) ON DELETE CASCADE,

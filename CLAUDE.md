@@ -30,6 +30,7 @@ docker compose up -d
 uv run ruff format . && uv run ruff check . && uv run pytest
 uv run asklineage init-db
 uv run asklineage load-manifest data/manifests/calitp/manifest.json --owners config/owners.calitp.yml
+uv run asklineage lineage dim_schedule_feeds --direction downstream --depth 2
 uv run python scripts/manifest_stats.py data/manifests/calitp/manifest.json
 ```
 
@@ -67,8 +68,8 @@ Phase 1 steps:
 1. Project setup — done
 2. Get the dbt manifest (Cal-ITP) — done
 3. Schema, manifest parser, loader, owner rules — done
-4. **Next:** lineage queries — fuzzy name matching (pg_trgm), upstream/downstream recursive CTEs with a depth limit and cycle protection, tests against a real Postgres (add a Postgres service to CI)
-5. LLM provider interface (Bedrock) + lineage answer: fixed table from SQL + LLM summary + grounding check
+4. Lineage queries — exact-or-candidates name resolution (pg_trgm suggestions), depth-bounded upstream/downstream CTE with `truncated` flag, `asklineage lineage` CLI, Postgres tests + CI service — done
+5. **Next:** LLM provider interface (Bedrock) + lineage answer: fixed table from SQL + LLM summary + grounding check
 6. LangGraph flow (guard → lineage → answer → check) and `/api/ask`
 7. Eval v1: about 30 golden lineage questions generated from the manifest, a runner, a results report
 8. README update: architecture, quickstart, sample data with the Cal-ITP commit hash, first results
@@ -82,3 +83,5 @@ Evaluate each layer separately: classifier accuracy, name resolution, lineage se
 - `0001` Postgres adjacency list + recursive CTEs for lineage, not a graph database
 - `0002` Read dbt artifacts; never import dbt
 - `0003` Path-based owner rules when dbt has no owners
+- `0004` Name resolution returns candidates; a fuzzy match never answers
+- `0005` Bounded traversal: depth cap + per-level dedup, not path tracking
