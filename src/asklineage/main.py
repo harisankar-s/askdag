@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 
+from asklineage.api.ask import router as ask_router
 from asklineage.db import close_pool, get_pool
 
 
@@ -13,6 +14,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="asklineage", lifespan=lifespan)
+app.include_router(ask_router)
 
 
 @app.get("/health/live")

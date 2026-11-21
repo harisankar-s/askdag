@@ -12,6 +12,7 @@ dependencies = [
     "psycopg[binary,pool]>=3.2",
     "pyyaml>=6.0.4",
     "openai>=3.57.0",
+    "langgraph>=1.2.24",
 ]
 
 [project.scripts]

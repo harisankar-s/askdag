@@ -15,7 +15,7 @@ The author is a data engineering architect building this to learn enterprise RAG
 
 ## Stack and conventions
 
-- Python 3.12, uv (`uv add`, `uv sync`, `uv run`), FastAPI, psycopg 3 with a connection pool, Postgres 17 + pgvector in `docker-compose.yml`.
+- Python 3.12, uv (`uv add`, `uv sync`, `uv run`), FastAPI, psycopg 3 with a connection pool, Postgres 17 + pgvector in `docker-compose.yml`. LangGraph orchestrates `/api/ask` (graph runtime only, no LangChain models; ADR 0008).
 - Layout: `src/asklineage/` (package), `tests/`, `scripts/`, `config/`, `docs/decisions/`, `tools/dbt/`.
 - Ruff for lint and format (line length 100); CI runs `ruff check`, `ruff format --check` and `pytest` (`.github/workflows/ci.yml`).
 - Keep parsing pure (no database) so it's unit-testable with `tests/fixtures/mini_manifest.json`; database writes live in `ingest/load.py`.
@@ -34,6 +34,8 @@ uv run asklineage lineage dim_schedule_feeds --direction downstream --depth 2
 uv run asklineage lineage dim_schedule_feeds --direction downstream --depth 2 --summarize -v
 uv run python scripts/manifest_stats.py data/manifests/calitp/manifest.json
 uv run asklineage llm-check
+uv run uvicorn asklineage.main:app --reload
+curl -s localhost:8000/api/ask -H 'content-type: application/json' -d '{"node": "dim_schedule_feeds"}'
 ```
 
 ## Sample data
@@ -77,7 +79,9 @@ Phase 1 steps:
    - 5c `LineageFacts` (pure; counts cover every node, names capped by `LLM_MAX_NAMED_NODES`) + claims schema + prompt — done
    - 5d grounding check (pure) + template + reusable `generate_checked` loop (`answer/generate.py`); ADR 0007 — done
    - 5e `lineage --summarize [-v]` CLI — done. Redesigned to option B after three Cal-ITP runs; run 4 moved owners out of LLM text into code-added tags (ADR 0007 has the history and the A/B/C/D comparison); run 5: both directions grounded on the first attempt (highlights true but not yet well chosen; eval in Step 7)
-6. **Next:** LangGraph flow (guard → lineage → answer → check) and `/api/ask`
+6. LangGraph flow and `/api/ask` (ADR 0008)
+   - 6a done (158 tests; first Cal-ITP runs in ADR 0008): stateless graph (`api/flow.py`): `parse` (LLM reads the question; entity must appear in it as a whole name) or `read_fields` (structured, works with `LLM_PROVIDER=none`) → `resolve` → `lineage` → `answer`, with `abstain` and `clarify` branches; `POST /api/ask` returns `kind` = lineage | clarification | abstain, attempts tagged by stage
+   - 6b **next**: Postgres checkpointer; clarification as `interrupt()` + resume by `thread_id`; follow-up questions reuse the previous node; the stateless path stays
 7. Eval v1: about 30 golden lineage questions generated from the manifest, a runner, a results report
 8. README update: architecture, quickstart, sample data with the Cal-ITP commit hash, first results
 
@@ -94,3 +98,4 @@ Evaluate each layer separately: classifier accuracy, name resolution, lineage se
 - `0005` Bounded traversal: depth cap + per-level dedup, not path tracking
 - `0006` Narrow LLM provider interface; OpenAI-compatible first; `none` by default
 - `0007` Code writes the lineage facts; the LLM adds checked relation highlights; generic retry loop
+- `0008` LangGraph orchestrates `/api/ask` (for 6b checkpoints and Phase 3 loops, and to learn it); plain functions would do for 6a
