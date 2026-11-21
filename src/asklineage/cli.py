@@ -7,6 +7,7 @@ from pathlib import Path
 
 import psycopg
 from psycopg.rows import dict_row
+from pydantic import BaseModel
 
 from asklineage.config import get_settings
 from asklineage.ingest.load import apply_schema, load_manifest
@@ -14,6 +15,8 @@ from asklineage.ingest.manifest import UnsupportedManifestError, parse_manifest
 from asklineage.ingest.owners import load_owner_rules
 from asklineage.lineage.graph import DEFAULT_DEPTH, MAX_DEPTH, Direction, Lineage, lineage
 from asklineage.lineage.resolve import Ambiguous, NotFound, Resolved, resolve_node
+from asklineage.llm.base import LLMError
+from asklineage.llm.factory import get_provider
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -30,9 +33,13 @@ def main(argv: list[str] | None = None) -> None:
     )
     show.add_argument("--depth", type=int, default=DEFAULT_DEPTH, help=f"1 to {MAX_DEPTH} hops")
     show.add_argument("--project", help="only match nodes in this dbt project")
+    commands.add_parser("llm-check", help="Send one small request to the configured LLM")
     args = parser.parse_args(argv)
     if args.command == "lineage" and not 1 <= args.depth <= MAX_DEPTH:
         parser.error(f"--depth must be between 1 and {MAX_DEPTH}")
+    if args.command == "llm-check":
+        _check_llm()
+        return
 
     with psycopg.connect(get_settings().database_url, row_factory=dict_row) as conn:
         apply_schema(conn)
@@ -42,6 +49,33 @@ def main(argv: list[str] | None = None) -> None:
             _show_lineage(conn, args)
         else:
             _load_manifest(conn, args, parser)
+
+
+class _Ping(BaseModel):
+    ok: bool
+    reply: str
+
+
+def _check_llm() -> None:
+    settings = get_settings()
+    provider = get_provider(settings)
+    if provider is None:
+        print("LLM_PROVIDER=none: summaries come from the template, and no model is called.")
+        return
+    try:
+        completion = provider.complete_json(
+            system="You are checking that a JSON API works.",
+            prompt='Set ok to true and reply to the word "ready".',
+            output=_Ping,
+        )
+    except LLMError as exc:
+        print(f"LLM check failed: {exc}")
+        raise SystemExit(1) from exc
+    print(
+        f"{completion.model} at {settings.llm_base_url}: ok={completion.data.ok}, "
+        f"reply={completion.data.reply!r}, {completion.latency_ms} ms, "
+        f"tokens in/out {completion.input_tokens}/{completion.output_tokens}"
+    )
 
 
 def _load_manifest(
