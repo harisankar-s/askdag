@@ -22,6 +22,24 @@ class Settings(BaseSettings):
     # How many node names the summary prompt may list; counts always cover every node.
     llm_max_named_nodes: int = Field(default=20, ge=1, le=500)
 
+    embed_provider: Literal["none", "openai_compatible"] = "none"
+    embed_base_url: str = "http://localhost:11434/v1"
+    embed_model: str = "nomic-embed-text"
+    embed_api_key: SecretStr = SecretStr("ollama")
+    embed_timeout_seconds: float = 60.0
+    # Must match the vector column; pgvector cannot index more than 2,000 dimensions.
+    embed_dimensions: int = Field(default=768, ge=1, le=2000)
+    embed_batch_size: int = Field(default=32, ge=1, le=2048)
+    # nomic-embed-text's task prefixes; set both to "" for models without them.
+    embed_document_prefix: str = "search_document: "
+    embed_query_prefix: str = "search_query: "
+    # Path patterns of the models users should query; a matching staging model or source lifts
+    # them in semantic search. [] turns lineage-aware ranking off.
+    search_preferred_paths: list[str] = ["models/mart/*"]
+    # A semantic top score below this is flagged low confidence (ADR 0012: 0.667 caught 3 of 5
+    # unanswerable Cal-ITP questions and blocked 1 of 30). A flag, not an abstain.
+    search_low_confidence_below: float = Field(default=0.667, ge=0, le=1)
+
 
 @lru_cache
 def get_settings() -> Settings:

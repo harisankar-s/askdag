@@ -9,17 +9,22 @@ from ask_examples import (
     QUESTION,
     RAW_ORDERS,
     STG_ORDERS,
+    owner_reply,
 )
 from helpers import TEST_PROJECT
 
 from asklineage.answer.lineage_answer import HighlightStatus
-from asklineage.api.flow import run_ask
+from asklineage.api.flow import SearchOptions, run_ask
 from asklineage.api.models import (
     AbstainResponse,
     AskRequest,
     ClarificationResponse,
     LineageResponse,
+    OwnerResponse,
+    SearchResponse,
 )
+from asklineage.embed.hashing import HashingEmbedder
+from asklineage.embed.store import sync_chunks
 from asklineage.lineage.graph import Direction
 from asklineage.llm.base import LLMError
 from asklineage.llm.scripted import ScriptedProvider
@@ -81,14 +86,50 @@ def test_parsed_direction_and_depth_are_used(conn):
     assert response.highlight_status is HighlightStatus.REJECTED
 
 
-def test_a_question_that_is_not_lineage_abstains(conn):
+def test_an_out_of_scope_question_abstains(conn):
     provider = ScriptedProvider([NOT_LINEAGE])
 
-    response = ask(conn, provider, question="Who owns fct_orders?")
+    response = ask(conn, provider, question="How do I write a window function?")
 
     assert isinstance(response, AbstainResponse)
-    assert response.reason == "not_lineage"
+    assert response.reason == "out_of_scope"
     assert len(provider.calls) == 1
+
+
+def test_an_owner_question_is_answered_from_the_nodes_table(conn):
+    provider = ScriptedProvider([owner_reply()])
+
+    response = ask(conn, provider, question="Who owns stg_orders?")
+
+    assert isinstance(response, OwnerResponse)
+    assert response.node.unique_id == STG_ORDERS.unique_id
+    assert (response.owner, response.owner_source) == ("finance", "owners_file")
+    assert response.owner_source_meaning.startswith("assigned by path rules")
+    assert response.message.startswith("stg_orders is owned by finance")
+    assert stages(response) == ["parse"]
+
+
+def test_an_owner_question_says_when_no_owner_is_recorded(conn):
+    provider = ScriptedProvider([owner_reply("mart_weekly")])
+
+    response = ask(conn, provider, question="Who owns mart_weekly?")
+
+    assert isinstance(response, OwnerResponse)
+    assert (response.owner, response.owner_source, response.owner_source_meaning) == (
+        None,
+        None,
+        None,
+    )
+    assert "No owner is recorded for mart_weekly" in response.message
+
+
+def test_an_owner_question_about_an_ambiguous_name_asks_which(conn):
+    provider = ScriptedProvider([owner_reply("orders")])
+
+    response = ask(conn, provider, question="Who owns orders?")
+
+    assert isinstance(response, ClarificationResponse)
+    assert response.reason == "ambiguous"
 
 
 def test_free_text_without_an_llm_abstains(conn):
@@ -155,3 +196,36 @@ def test_a_typo_suggests_but_never_answers(conn):
     assert response.query == "stg_ordrs"
     assert response.candidates[0].unique_id == STG_ORDERS.unique_id
     assert len(provider.calls) == 1
+
+
+def search_reply():
+    return {**NOT_LINEAGE, "intent": "search"}
+
+
+def test_a_search_question_without_embeddings_falls_back_to_keywords(conn):
+    response = ask(conn, ScriptedProvider([search_reply()]), question="Where are the weekly marts?")
+
+    assert isinstance(response, SearchResponse)
+    assert response.mode == "keyword"
+    assert response.low_confidence
+    assert [hit.display_name for hit in response.hits] == ["mart_weekly"]
+    assert stages(response) == ["parse"]
+
+
+def test_a_search_question_ranks_by_meaning_and_flags_weak_matches(conn):
+    embedder = HashingEmbedder()
+    sync_chunks(conn, TEST_PROJECT, embedder)
+    options = SearchOptions(embedder=embedder, low_confidence_below=0.99)
+
+    response = run_ask(
+        conn,
+        ScriptedProvider([search_reply()]),
+        AskRequest(project=TEST_PROJECT, question="weekly mart"),
+        max_named=20,
+        search_options=options,
+    )
+
+    assert response.mode == "semantic"
+    assert response.hits[0].display_name == "mart_weekly"
+    assert response.low_confidence
+    assert "under 0.99" in response.message

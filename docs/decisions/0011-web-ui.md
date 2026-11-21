@@ -57,3 +57,7 @@ The page draws each lineage answer as an SVG graph above the table, from `table`
 The first version showed both input rows at once: `.row { display: flex }` overrides the `hidden` attribute, so the mode toggle did nothing visible. Fixed with `[hidden] { display: none !important; }`. A hand check caught it; no Python test can.
 - A segmented Question / Structured control, project and LLM shown as pills (the LLM pill is amber when none is configured), monospace node names, muted "no owner recorded", row hover, focus rings, and a light and dark palette from CSS variables only. About 90 lines of CSS; the "no framework" rule stands.
 - Backtick-marked node names in the summary and highlights are shown as `<code>` by splitting the text on backticks and building DOM nodes. Still no `innerHTML`.
+
+## Addendum: owner and search answers (step 2d.3)
+- `kind: owner` shows the code-written message and says plainly when no owner is recorded.
+- `kind: search` shows the mode, the message, a low-confidence note, and a table with score, the chunk kind that matched, name, owner and `via`. Clicking a name asks for its downstream lineage. Values still go in through `textContent` and `createElement`, never `innerHTML`.

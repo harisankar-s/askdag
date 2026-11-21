@@ -7,7 +7,8 @@ The author is a data engineering architect building this to learn enterprise RAG
 ## How to work with the author
 
 - **Write the code; don't run commands.** Give numbered steps with each command in its own `bash` block, what it does, and the expected output. The author runs everything in the VS Code terminal and pastes results back. Reading files to check things is fine.
-- Explain the idea and the design before writing code, then stop after each step for questions.
+- Explain the idea and the design briefly before writing code, then stop after each step for questions.
+- Keep chat replies crisp and short to save tokens: bullets over prose, no recaps of what the code already shows, no long rationale. Put depth in ADRs, not in chat.
 - Be direct and push back when a choice doesn't hold up.
 - For external downloads, give the browser option first (URL, button, where to unzip), then the CLI.
 - No LinkedIn angles mid-build. There will be one launch post at the end (demo video, GitHub link, one trade-off) plus a longer article. Record real trade-offs in `docs/decisions/` as they come up; that's the article's source material.
@@ -34,6 +35,9 @@ uv run asklineage lineage dim_schedule_feeds --direction downstream --depth 2
 uv run asklineage lineage dim_schedule_feeds --direction downstream --depth 2 --summarize -v
 uv run python scripts/manifest_stats.py data/manifests/calitp/manifest.json
 uv run asklineage llm-check
+uv run asklineage embed-check
+uv run asklineage embed
+uv run asklineage search "Which table has the latitude and longitude of every stop?"
 uv run uvicorn asklineage.main:app --reload
 open http://localhost:8000/
 curl -s localhost:8000/api/info
@@ -42,6 +46,8 @@ curl -s localhost:8000/api/ask -H 'content-type: application/json' -d '{"questio
 uv run asklineage prune-threads --older-than-hours 24
 uv run asklineage eval conformance data/manifests/calitp/manifest.json
 uv run asklineage eval golden data/manifests/calitp/manifest.json
+uv run asklineage eval search-set data/manifests/calitp/manifest.json
+uv run asklineage eval search data/manifests/calitp/manifest.json
 uv run asklineage eval run data/manifests/calitp/manifest.json --source-repo data/raw/data-infra
 ```
 
@@ -70,37 +76,29 @@ Key design rules:
 | Phase | Goal | Status |
 |---|---|---|
 | 0 | Starter kit: FastAPI, Postgres + pgvector, CI | Done |
-| 1 | Lineage MVP | Done (pending 8c review) |
-| 2 | pgvector semantic search + question classifier | Planned |
+| 1 | Lineage MVP | Done |
+| 2 | pgvector semantic search + question classifier | Done |
 | 3 | Synthetic incidents, runbooks, Slack threads; hybrid retrieval | Planned |
 | 4 | Refresh on dbt deploy; second project (Snowflake); manifest diffing | Planned |
 | 5 | Experiments: pgvector vs. Pinecone, LLM providers, column-level lineage | Planned |
 | 6 | Hardening: auth, OpenTelemetry, deployment, eval in CI; eval v2 (bigger golden set, hand labels, highlights chosen in code) | Planned |
 
-Phase 1 steps:
-1. Project setup — done
-2. Get the dbt manifest (Cal-ITP) — done
-3. Schema, manifest parser, loader, owner rules — done
-4. Lineage queries — exact-or-candidates name resolution (pg_trgm suggestions), depth-bounded upstream/downstream CTE with `truncated` flag, `asklineage lineage` CLI, Postgres tests + CI service — done
-5. LLM provider interface + lineage answer: fixed table from SQL + LLM summary + grounding check
-   - 5a provider Protocol, `ScriptedProvider`, LLM settings, ADR 0006 — done
-   - 5b OpenAI-compatible adapter + provider factory + `asklineage llm-check` (adds `openai`; openai 3.x runs on `httpx2`, so adapter tests mock with `httpx2.MockTransport`) — done
-   - 5c `LineageFacts` (pure; counts cover every node, names capped by `LLM_MAX_NAMED_NODES`) + claims schema + prompt — done
-   - 5d grounding check (pure) + template + reusable `generate_checked` loop (`answer/generate.py`); ADR 0007 — done
-   - 5e `lineage --summarize [-v]` CLI — done. Redesigned to option B after three Cal-ITP runs; run 4 moved owners out of LLM text into code-added tags (ADR 0007 has the history and the A/B/C/D comparison); run 5: both directions grounded on the first attempt (highlights true but not yet well chosen; eval in Step 7)
-6. LangGraph flow and `/api/ask` (ADR 0008)
-   - 6a done (158 tests; first Cal-ITP runs in ADR 0008): stateless graph (`api/flow.py`): `parse` (LLM reads the question; entity must appear in it as a whole name) or `read_fields` (structured, works with `LLM_PROVIDER=none`) → `resolve` → `lineage` → `answer`, with `abstain` and `clarify` branches; `POST /api/ask` returns `kind` = lineage | clarification | abstain, attempts tagged by stage
-   - 6b done (ADR 0009; tested on Cal-ITP: typo → resumable clarification → choose → follow-up): opt-in threads (`start_thread` → server-issued `thread_id`, `ask_threads` table, 404/409), `PostgresSaver` on a second autocommit pool (`init-db` runs `setup()`), `begin` clears turn-scoped keys, `clarify` uses `interrupt()` and `choose` resumes it (choice must be a candidate), follow-ups via `same_node` reuse `previous`, `durability="exit"`, explicit serializer allowlist `STATE_TYPES`, `prune-threads`; flow tests use `InMemorySaver` with the same serializer
-7. Eval v1 (ADR 0010) — done for Phase 1
-   - 7a ground truth + conformance: `eval/truth.py` (stdlib only, BFS over `depends_on`), `eval/conformance.py` (every node × both directions × depths 1, 2, 3, 5, 25: node set, fewest hops, edges, `truncated`; refuses a stale load), `asklineage eval conformance`; CI runs it on `tests/synthetic_manifest.py` (seeded, about 170 nodes) with a mutation test — done; Cal-ITP: 8,650 walks, 0 mismatches, 8.7 s
-   - 7b.1 golden question set (`eval/golden.py`, `eval/templates.py`, `asklineage eval golden`): generated at run time, never committed; role-based node selection, expected outcomes from the manifest and ADR 0004's exact-name rule, phrasing seeded per item id, set sha; about 46 items / 56 turns — done; reviewed on Cal-ITP (a follow-up with no depth keeps the previous depth, confirmed)
-   - 7b.2 `eval/score.py` (one outcome per turn: correct, acceptable, safe_wrong, silent_wrong, blocked, error; the answer's own walk is always checked against the manifest), `eval/run.py` (`run_ask` per turn, threads on `InMemorySaver`, warm-up parse, run metadata), `eval/report.py` (per-layer summary, counts with % only from 20 turns), `asklineage eval run` (exits 1 on lineage, facts or error bugs) writing `data/eval/runs/<time>-<model>/` — done; Cal-ITP without an LLM: 55 correct, 1 expected block, 0 silent wrong, lineage and facts 13/13
-   - 7c `AttemptInfo.rules` (violation rule names); `eval/highlights.py`: first-attempt failures split into hallucination vs output rules, kept highlights re-checked against manifest edges and paths, usefulness proxy (minority-team hit, coverage, alphabetical bias, reach past one hop) vs code baseline (first named nodes via `build_facts`) and seeded random — done. qwen2.5:7b on Cal-ITP: 51 correct / 1 acceptable / 2 safe wrong / 1 silent wrong of 55; reading 24/25; highlights true (0 of 96 contradicted) but worse than random at choosing (minority-team hit 3/17 vs code 17/17, random 16/17); parse p50 691 ms, highlights p50 4.95 s. Then: `check_parse` rule `same_node_names_another_node` (project node names passed on follow-ups) and `recover_reading` (a typo the model corrected is resolved from the question's only name-like token) — done. Rerun: 53 correct / 1 acceptable / 0 safe wrong / 2 silent wrong; both fixes worked, and the two silent errors are now direction errors the old behaviour hid. `AttemptInfo.reply` added and traced: both times the parse retry flipped a direction the first attempt had right. Fix: `keep_first_reading` keeps direction and depth from the first attempt unless it was flagged for them — done. Final qwen2.5:7b run on Cal-ITP: 55 correct / 1 acceptable / 0 wrong of 56; reading 25/25; follow-ups 7/7; highlights true but still worse than random at choosing (deferred)
-   - The rest moved to Phase 6 (eval v2): a bigger golden set, hand labels for the usefulness proxy, and choosing highlights in code (own ADR; revisit when Phase 2 adds descriptions)
-8. Web UI and README
-   - 8a web UI (ADR 0011): `web/index.html` (static, plain JS, no `innerHTML`) served at `GET /`; `GET /api/info` (projects, LLM provider and model, no secrets); question and structured modes, conversation toggle, all three response kinds, attempts panel; Python tests for `/`, `/api/info` and the `innerHTML` rule, none for the JavaScript (checked by hand) — built, awaiting review
-   - 8a.2 graph view: edges in `/api/ask` (`LineageResponse.edges`, parent -> child, checked by the eval against the manifest; ADR 0011 addendum) — done; SVG graph in the page (columns by depth, 40-node cap, click to ask, hand-checked) — built, awaiting review
-   - 8c README: architecture diagram, quickstart (Cal-ITP pinned at 546e354, manifest at `warehouse/manifest.json`), Ollama setup, sample data and AGPL note, first results from ADR 0010, roadmap, known limits, screenshot placeholder (add `docs/images/web-ui.png`) — written, awaiting review. Phase 1 is complete after review.
+Phase 1 is built (steps 1 to 8); the history and numbers live in ADRs 0001–0011 and the README, so they aren't repeated here. What to know when coding:
+- Modules: `ingest/` (manifest parser, loader, owner rules), `lineage/` (name resolution, bounded walk), `llm/` (provider interface, OpenAI-compatible adapter, `ScriptedProvider` for tests), `embed/` (embedding interface, OpenAI-compatible adapter, `HashingEmbedder` for tests; ADR 0012), `answer/` (facts, grounding, `generate_checked`, parse checks), `api/` (flow, ask, threads, models, info), `eval/` (truth, conformance, golden set, score, run, highlights), `web/index.html` (static page, no `innerHTML`, no JS tests; checked by hand).
+- openai 3.x runs on `httpx2`, so adapter tests mock with `httpx2.MockTransport`.
+- `/api/ask` threads use `PostgresSaver`; every type stored in flow state must be in `STATE_TYPES` (`api/flow.py`). `LineageResponse.edges` is required and the eval checks it against the manifest.
+- Eval baseline on Cal-ITP: conformance 8,650 walks, 0 mismatches; qwen2.5:7b final run 55 correct, 1 acceptable, 0 wrong of 56. Highlights are true but chosen worse than random; choosing them in code is deferred to Phase 6 (eval v2).
+- Open items: replace the clone URL placeholder in `README.md` and add `docs/images/web-ui.png`.
+
+Phase 2 steps:
+- 2a embedding provider interface (ADR 0012): `EmbeddingProvider.embed(texts, kind)`, separate `EMBED_*` settings, task prefixes as settings (nomic defaults), dimension check, `none` default, `HashingEmbedder` for CI, `asklineage embed-check` — built, awaiting review
+- 2b first the hand-written search questions (`config/search_questions.calitp.yml`, 35 questions in 5 categories: described, column, jargon, undescribed, unanswerable; `eval/search_set.py` checks them against the manifest and shows word overlap; `asklineage eval search-set`) — drafted (d10 reworded); the author may add questions. Then chunks (`embed/chunks.py`: summary/columns/sql, 2,000-char pieces, header on each) + `node_chunks` (no FK to nodes; re-embed on text hash or model change) + `asklineage embed` (`embed/store.py`) — done; Cal-ITP: 2,799 chunks (875 summary, 952 columns, 972 sql) in 62 s, rerun embeds 0
+- 2c search query and CLI; keyword (full-text) fallback when `EMBED_PROVIDER=none`, and the answer says which path ran — done (`search/query.py`: best chunk per node by cosine, `--kinds` filter, chunks only from the configured model; keyword = OR'd full-text over name, description, columns, SQL; no abstain threshold yet); spot checks: c06 hit (staging first), u01 miss, n01 top 0.667
+- 2d `intent` added to the parse call (not a second LLM call), with owner lookup answered from SQL
+  - 2d.1 (ADR 0013): `intent` replaces `is_lineage`; `owner` node + `OwnerResponse` from SQL; `out_of_scope` replaces `not_lineage`; golden set v2 (owner items) — done; qwen2.5:7b: 57 correct, 1 acceptable, 0 wrong of 58 after `named_node_wins` (a follow-up naming a node beats same_node); owner 4/4
+  - 2d.2 search in `/api/ask` (`SearchResponse`, `low_confidence` flag under `SEARCH_LOW_CONFIDENCE_BELOW`, `SearchOptions` through `run_ask`; golden v3 with 2 search-intent turns) — done; qwen2.5:7b 59 correct, 1 acceptable, 0 wrong of 60
+  - 2d.3 web UI for owner and search kinds (`renderOwner`, `renderSearch`, ADR 0011 addendum) — done, checked by hand
+- 2e search eval: recall@k on the hand-written questions, both search paths — built (`eval/search_eval.py`, `asklineage eval search`: 6 configs, hit@k/MRR/recall@10 by category, cutoff table, writes `data/eval/search/`); vectors now tagged with model + document prefix (`index_name`), so a prefix change re-embeds. Cal-ITP (ADR 0012 table): semantic all kinds hit@5 19/30, MRR 0.525 vs keyword 9/30, 0.161; prefixes kept (better cutoff); cutoff 0.667 catches 3/5 unanswerable, blocks 1/30, so it is a flag, not an abstain. Then: snake_case split in column/sql chunks (kept, noise-level); family metric fam@1 18 vs hit@1 12; lineage-aware ranking (`SEARCH_PREFERRED_PATHS`, lift ≤3 marts within 2 hops, 0.98 for non-preferred, `via`) on by default; Cal-ITP all kinds: hit@1 16/30, hit@5 22/30, MRR 0.614 (from 12, 20, 0.519); cutoff unchanged
 
 ## Evaluation approach
 
@@ -119,3 +117,5 @@ Evaluate each layer separately: classifier accuracy, name resolution, lineage se
 - `0009` Conversation threads: opt-in, server-issued IDs, Postgres checkpoints, turn-scoped state reset, `interrupt()` clarifications, follow-ups, locks and pruning
 - `0010` Eval v1: exhaustive lineage conformance against an independent stdlib BFS over `depends_on`; synthetic manifest in CI; question set per layer (7b–7d)
 - `0011` Web UI: one static HTML page served by FastAPI, using only `/api/ask` and `/api/info`, with a hand-written SVG graph; not Streamlit/Gradio or React
+- `0012` Separate embedding provider interface; task prefixes and dimension as settings; nomic-embed-text default
+- `0013` Intent in the parse call (lineage, owner, search, other); owner answers from SQL

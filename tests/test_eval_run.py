@@ -128,7 +128,7 @@ def test_a_follow_up_answered_about_the_previous_node_is_flagged(
 def test_non_answers_are_safe_wrong_acceptable_or_silent(
     context: EvalContext, golden: GoldenSet
 ) -> None:
-    abstained = AbstainResponse(reason="not_lineage", message="m")
+    abstained = AbstainResponse(reason="out_of_scope", message="m")
     not_found = ClarificationResponse(reason="not_found", query="q", message="m", candidates=[])
     assert score(context, golden, "f-hub-down", 1, abstained).outcome == "safe_wrong"
     assert score(context, golden, "vague", 1, not_found).outcome == "acceptable"

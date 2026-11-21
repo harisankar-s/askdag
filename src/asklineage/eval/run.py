@@ -24,6 +24,7 @@ from asklineage.answer.parse import system_prompt as parse_prompt
 from asklineage.answer.prompt import system_prompt as highlights_prompt
 from asklineage.api.flow import (
     ASK_GRAPH,
+    SearchOptions,
     build_graph,
     checkpoint_serde,
     run_ask,
@@ -48,6 +49,7 @@ class EvalContext:
     index: NameIndex
     owners: Mapping[str, str | None]
     max_named: int
+    search: SearchOptions = SearchOptions()
 
 
 @dataclass(frozen=True)
@@ -157,6 +159,7 @@ def _ask_turn(
             max_named=context.max_named,
             graph=flow,
             thread_id=thread_id,
+            search_options=context.search,
         )
     except Exception as exc:
         # Keep going: one failing turn is reported as an error, not the end of the run.
@@ -192,7 +195,7 @@ def run_golden(
             scores.append(score)
             if on_turn:
                 on_turn(score)
-            if score.kind == "lineage":
+            if score.kind in ("lineage", "owner"):
                 previous_node = score.node_id
     return scores
 

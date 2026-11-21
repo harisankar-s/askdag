@@ -48,6 +48,7 @@ class TurnScore:
     lineage_ok: bool | None = None  # the table, edges and truncated flag match the manifest
     facts_ok: bool | None = None  # the summary's counts match the manifest
     candidates_ok: bool | None = None  # ambiguous: exactly the expected candidates
+    owner_ok: bool | None = None  # owner: the owner and its source match the loaded nodes
     suggestion_rank: int | None = None  # 1-based; 0 when the expected node wasn't suggested
     reused_previous: bool = False  # a follow-up naming a new node was answered about the old one
     highlight_status: str | None = None
@@ -170,9 +171,9 @@ def score_turn(
     if kind != expected.kind:
         if kind in expected.also:
             outcome: Outcome = "acceptable"
-        elif kind == "lineage":
+        elif kind in ("lineage", "owner"):
             outcome = "silent_wrong"
-            problems.append(f"answered with lineage; expected {expected.kind}")
+            problems.append(f"answered with {kind}; expected {expected.kind}")
         else:
             outcome = "safe_wrong"
             problems.append(f"expected {expected.kind}, got {kind} ({reason})")
@@ -184,6 +185,18 @@ def score_turn(
         }
         problems += [f"wrong {name.removesuffix('_ok')}" for name, ok in fields.items() if not ok]
         outcome = "correct" if all(fields.values()) else "silent_wrong"
+    elif kind == "owner":
+        node_id = response.node.unique_id
+        fields = {
+            "node_id": node_id,
+            "node_ok": node_id == expected.node_id,
+            "owner_ok": response.owner == owners.get(node_id),
+        }
+        if not fields["node_ok"]:
+            problems.append("wrong node")
+        if not fields["owner_ok"]:
+            problems.append(f"owner {response.owner!r}, expected {owners.get(node_id)!r}")
+        outcome = "correct" if fields["node_ok"] and fields["owner_ok"] else "silent_wrong"
     elif expected.reason and reason != expected.reason:
         outcome = "safe_wrong"
         problems.append(f"expected {kind} {expected.reason}, got {reason}")

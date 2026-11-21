@@ -112,7 +112,10 @@ def summarize(scores: Sequence[TurnScore], llm: bool) -> dict:
         "bugs": [
             f"{s.item_id} turn {s.turn}"
             for s in scores
-            if s.outcome == "error" or s.lineage_ok is False or s.facts_ok is False
+            if s.outcome == "error"
+            or s.lineage_ok is False
+            or s.facts_ok is False
+            or s.owner_ok is False
         ],
         "lineage": {
             "table": _share(lineage, lambda s: bool(s.lineage_ok)),
@@ -159,11 +162,18 @@ def summarize(scores: Sequence[TurnScore], llm: bool) -> dict:
     }
     summary["abstention"] = {
         "off_topic_abstained": _share(
-            (s for s in scored if s.expected.reason == "not_lineage"),
+            (s for s in scored if s.expected.reason == "out_of_scope"),
             lambda s: s.kind == "abstain",
         ),
         "false_abstains": _share(expects_lineage, lambda s: s.kind == "abstain"),
     }
+    owner_turns = [s for s in scored if s.free_text and s.expected.kind == "owner"]
+    summary["owner"] = {
+        "right": _share(owner_turns, lambda s: s.outcome in RIGHT),
+        "read_as_owner": _share(owner_turns, lambda s: s.kind == "owner"),
+    }
+    search_turns = [s for s in scored if s.free_text and s.expected.kind == "search"]
+    summary["search"] = {"read_as_search": _share(search_turns, lambda s: s.kind == "search")}
     summary["follow_ups"] = {}
     for value in ("yes", "no", "either"):
         turns = [s for s in scored if s.same_node == value]
@@ -194,6 +204,11 @@ def _got(score: TurnScore) -> str:
     if score.kind == "lineage":
         node = score.response["node"]["display_name"]
         return f"lineage {node} {score.direction} {score.depth}"
+    if score.kind == "search":
+        hits = score.response["hits"]
+        return f"search {hits[0]['display_name'] if hits else 'no hits'}"
+    if score.kind == "owner":
+        return f"owner {score.response['node']['display_name']} {score.response['owner']}"
     return f"{score.kind} {score.reason}"
 
 
@@ -330,6 +345,19 @@ def render(info: RunInfo, golden: GoldenSet, summary: dict, scores: Sequence[Tur
                 ("off-topic questions that abstained", fmt(abstention["off_topic_abstained"])),
                 ("lineage questions that abstained", fmt(abstention["false_abstains"])),
             ],
+        )
+        lines += ["", "## Owner questions", ""]
+        lines += _table(
+            ("check", "result"),
+            [
+                ("read as owner questions", fmt(summary["owner"]["read_as_owner"])),
+                ("right node and owner", fmt(summary["owner"]["right"])),
+            ],
+        )
+        lines += ["", "## Search questions (intent only; `eval search` scores retrieval)", ""]
+        lines += _table(
+            ("check", "result"),
+            [("read as search questions", fmt(summary["search"]["read_as_search"]))],
         )
         lines += ["", "## Follow-ups", ""]
         lines += _table(

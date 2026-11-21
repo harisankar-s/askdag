@@ -14,6 +14,7 @@ from ask_examples import (
     QUESTION,
     RAW_ORDERS,
     STG_ORDERS,
+    owner_reply,
     parse_reply,
 )
 from helpers import TEST_PROJECT
@@ -276,3 +277,58 @@ def test_a_thread_in_use_cannot_be_locked_by_another_request(conn, database_url)
     with psycopg.connect(database_url, row_factory=dict_row) as other:
         assert try_lock_thread(other, thread_id) is False
         assert try_lock_thread(other, uuid4())
+
+
+def test_who_owns_it_follows_up_on_the_previous_node(conn, threads):
+    thread_id = uuid4()
+    turn(conn, threads, thread_id, node="stg_orders", direction="upstream", depth=2)
+    provider = ScriptedProvider([owner_reply(None, same_node=True)])
+
+    owned = turn(conn, threads, thread_id, provider, question="Who owns it?")
+    upstream = turn(
+        conn,
+        threads,
+        thread_id,
+        ScriptedProvider([parse_reply(None, direction=None, same_node=True), LLMError("down")]),
+        question="And what feeds it?",
+    )
+
+    assert owned.kind == "owner"
+    assert (owned.node.unique_id, owned.owner) == (STG_ORDERS.unique_id, "finance")
+    assert upstream.node.unique_id == STG_ORDERS.unique_id
+    assert (upstream.direction, upstream.depth) == (Direction.UPSTREAM, 2)
+
+
+def test_an_owner_clarification_resumes_into_an_owner_answer(conn, threads):
+    thread_id = uuid4()
+    asked = turn(
+        conn,
+        threads,
+        thread_id,
+        ScriptedProvider([owner_reply("orders")]),
+        question="Who owns orders?",
+    )
+
+    chosen = turn(conn, threads, thread_id, choose=ORDERS.unique_id)
+
+    assert asked.kind == "clarification" and asked.resumable
+    assert chosen.kind == "owner"
+    assert chosen.node.unique_id == ORDERS.unique_id
+
+
+def test_a_follow_up_naming_a_new_node_is_answered_about_it(conn, threads):
+    thread_id = uuid4()
+    turn(conn, threads, thread_id, node="stg_orders")
+    provider = ScriptedProvider(
+        [
+            parse_reply("fct_orders", same_node=True),
+            parse_reply(None, same_node=True),
+            LLMError("down"),
+        ]
+    )
+
+    answer = turn(conn, threads, thread_id, provider, question="And what does fct_orders feed?")
+
+    assert answer.kind == "lineage"
+    assert answer.node.unique_id == FCT_ORDERS.unique_id
+    assert names(answer) == ["mart_weekly"]

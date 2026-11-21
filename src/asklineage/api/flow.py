@@ -1,9 +1,14 @@
 """The /api/ask flow as a LangGraph graph (ADR 0008, 0009).
 
 START ─ begin ─┬─ read_fields ─────┬─ resolve ─┬─ lineage ─ answer
-               └─ parse ─┬────────┘           └─ clarify ─┬─ lineage
-                         ├─ lineage (follow-up)            └─ END
+               └─ parse ─┬────────┘           ├─ owner
+                         ├─ lineage | owner    └─ clarify ─┬─ lineage | owner
+                         │   (follow-up)                    └─ END
+                         ├─ search
                          └─ abstain
+
+The parse call's intent picks lineage or owner after a node is resolved; owner answers come
+from SQL alone.
 
 Nodes are thin wrappers over the pure functions; the connection and provider come through the
 runtime context, not the state, so the state can be checkpointed. One builder compiles twice:
@@ -21,12 +26,16 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import Command, interrupt
+from psycopg.rows import dict_row
 
+from asklineage.answer.facts import OWNER_SOURCE_MEANING
 from asklineage.answer.lineage_answer import HighlightStatus, answer_lineage
 from asklineage.answer.parse import (
+    Intent,
     PreviousQuestion,
     clean_entity,
     keep_first_reading,
+    named_node_wins,
     parse_question,
     recover_reading,
 )
@@ -45,7 +54,13 @@ from asklineage.api.models import (
     NodeInfo,
     NodeRow,
     OwnerInfo,
+    OwnerResponse,
+    SearchHit,
+    SearchResponse,
 )
+from asklineage.config import Settings
+from asklineage.embed.base import EmbeddingProvider
+from asklineage.embed.factory import get_embedder
 from asklineage.lineage.graph import DEFAULT_DEPTH, Direction, Lineage, LineageNode, lineage
 from asklineage.lineage.resolve import (
     Ambiguous,
@@ -57,14 +72,16 @@ from asklineage.lineage.resolve import (
     resolve_node,
 )
 from asklineage.llm.base import LLMProvider
+from asklineage.search.query import search
 
 # The longest run is 5 steps; a run that needs more is a bug, not a slow question.
 RECURSION_LIMIT = 10
 
 ABSTAIN_MESSAGES: dict[str, str] = {
-    "not_lineage": (
-        "asklineage answers lineage questions about this dbt project: where a model's data "
-        "comes from, and what reads from it downstream. Ask about a model or source by name."
+    "out_of_scope": (
+        "asklineage answers questions about this dbt project's models: where a model's data "
+        "comes from, what reads from it downstream, and who owns it. Ask about a model or "
+        "source by name."
     ),
     "not_understood": (
         "I couldn't tell which node and direction the question is about. Name the model or "
@@ -82,11 +99,20 @@ ABSTAIN_MESSAGES: dict[str, str] = {
 
 
 @dataclass(frozen=True)
+class SearchOptions:
+    embedder: EmbeddingProvider | None = None  # None: keyword search
+    prefer: tuple[str, ...] = ()  # path patterns for lineage-aware ranking; () turns it off
+    low_confidence_below: float = 0.667
+    k: int = 10
+
+
+@dataclass(frozen=True)
 class AskContext:
     conn: psycopg.Connection
     provider: LLMProvider | None
     max_named: int
     resumable: bool = False  # true only on a checkpointed thread, where interrupt() can work
+    search: SearchOptions = SearchOptions()
 
 
 @dataclass(frozen=True)
@@ -116,6 +142,7 @@ class AskState(TypedDict, total=False):
     # Turn-scoped: begin clears these, because a thread's checkpoint carries every key into
     # the next question, and a stale abstain_reason or root would route the new one wrongly.
     request: AskRequest
+    intent: Intent | None
     query: LineageQuery | None
     abstain_reason: AbstainReason | None
     root: Candidate | None
@@ -144,6 +171,9 @@ STATE_TYPES: tuple[type, ...] = (
     LineageResponse,
     ClarificationResponse,
     AbstainResponse,
+    OwnerResponse,
+    SearchResponse,
+    SearchHit,
     NodeInfo,
     CandidateInfo,
     NodeRow,
@@ -160,6 +190,7 @@ def checkpoint_serde() -> JsonPlusSerializer:
 
 def begin(state: AskState) -> AskState:
     return {
+        "intent": None,
         "query": None,
         "abstain_reason": None,
         "root": None,
@@ -178,7 +209,7 @@ def read_fields(state: AskState) -> AskState:
     request = state["request"]
     direction = request.direction or Direction.DOWNSTREAM
     query = LineageQuery(request.node, direction, request.depth or DEFAULT_DEPTH)
-    return {"query": query}
+    return {"intent": "lineage", "query": query}
 
 
 def parse(state: AskState, runtime: Runtime[AskContext]) -> AskState:
@@ -196,29 +227,43 @@ def parse(state: AskState, runtime: Runtime[AskContext]) -> AskState:
     known = node_names(runtime.context.conn, state["request"].project) if previous else frozenset()
     generated = parse_question(provider, question, asked_before, known)
     attempts = [AttemptInfo.from_attempt("parse", a) for a in generated.attempts]
-    parsed = generated.output or recover_reading(generated, question)
+    parsed = (
+        generated.output
+        or recover_reading(generated, question)
+        or named_node_wins(generated, question)
+    )
     if parsed is not None:
         parsed = keep_first_reading(generated, parsed)
     if parsed is None:
         reason = "llm_unavailable" if generated.attempts[-1].error else "not_understood"
         return {"abstain_reason": reason, "attempts": attempts}
-    if not parsed.is_lineage:
-        return {"abstain_reason": "not_lineage", "attempts": attempts}
+    if parsed.intent == "search":
+        return {"intent": "search", "attempts": attempts}
+    if parsed.intent == "other":
+        return {"abstain_reason": "out_of_scope", "attempts": attempts}
 
-    # The check guarantees a direction, or a previous question to keep one from.
-    direction = parsed.direction or previous.direction
+    # For lineage the check guarantees a direction, or a previous question to keep one from.
+    # An owner question keeps the previous direction and depth, so "and upstream?" still works.
+    fallback = previous.direction if previous else Direction.DOWNSTREAM
+    direction = parsed.direction or fallback
     depth = parsed.depth or (previous.depth if previous else DEFAULT_DEPTH)
+    update: AskState = {"intent": parsed.intent, "attempts": attempts}
     if parsed.same_node:
         query = LineageQuery(previous.root.display_name, direction, depth)
-        return {"query": query, "root": previous.root, "attempts": attempts}
-    query = LineageQuery(clean_entity(parsed.entity), direction, depth)
-    return {"query": query, "attempts": attempts}
+        return update | {"query": query, "root": previous.root}
+    return update | {"query": LineageQuery(clean_entity(parsed.entity), direction, depth)}
 
 
-def after_parse(state: AskState) -> Literal["abstain", "lineage", "resolve"]:
+def answer_route(state: AskState) -> Literal["lineage", "owner"]:
+    return "owner" if state.get("intent") == "owner" else "lineage"
+
+
+def after_parse(state: AskState) -> Literal["abstain", "search", "lineage", "owner", "resolve"]:
     if state.get("abstain_reason"):
         return "abstain"
-    return "lineage" if state.get("root") else "resolve"
+    if state.get("intent") == "search":
+        return "search"
+    return answer_route(state) if state.get("root") else "resolve"
 
 
 def abstain(state: AskState) -> AskState:
@@ -233,8 +278,8 @@ def resolve(state: AskState, runtime: Runtime[AskContext]) -> AskState:
     return {"unresolved": resolution}
 
 
-def after_resolve(state: AskState) -> Literal["lineage", "clarify"]:
-    return "lineage" if state.get("root") else "clarify"
+def after_resolve(state: AskState) -> Literal["lineage", "owner", "clarify"]:
+    return answer_route(state) if state.get("root") else "clarify"
 
 
 def candidates_of(unresolved: Ambiguous | NotFound) -> list[Candidate]:
@@ -286,8 +331,8 @@ def clarify(state: AskState, runtime: Runtime[AskContext]) -> AskState:
     return {"root": picked}
 
 
-def after_clarify(state: AskState) -> Literal["lineage", "__end__"]:
-    return "lineage" if state.get("root") else END
+def after_clarify(state: AskState) -> Literal["lineage", "owner", "__end__"]:
+    return answer_route(state) if state.get("root") else END
 
 
 def walk(state: AskState, runtime: Runtime[AskContext]) -> AskState:
@@ -328,6 +373,76 @@ def answer(state: AskState, runtime: Runtime[AskContext]) -> AskState:
     }
 
 
+def owner(state: AskState, runtime: Runtime[AskContext]) -> AskState:
+    root, query = state["root"], state["query"]
+    with runtime.context.conn.cursor(row_factory=dict_row) as cur:
+        row = cur.execute(
+            "SELECT owner, owner_source FROM nodes WHERE unique_id = %s", (root.unique_id,)
+        ).fetchone()
+    found = row["owner"] if row else None
+    source = row["owner_source"] if found else None
+    meaning = OWNER_SOURCE_MEANING.get(source, source) if source else None
+    if found:
+        message = f"{root.display_name} is owned by {found} ({meaning})."
+    else:
+        message = f"No owner is recorded for {root.display_name} in dbt or the owners file."
+    response = OwnerResponse(
+        node=NodeInfo.from_candidate(root),
+        owner=found,
+        owner_source=source,
+        owner_source_meaning=meaning,
+        message=message,
+    )
+    return {"response": response, "previous": Remembered(root, query.direction, query.depth)}
+
+
+def find(state: AskState, runtime: Runtime[AskContext]) -> AskState:
+    options = runtime.context.search
+    request = state["request"]
+    result = search(
+        runtime.context.conn,
+        request.question,
+        options.embedder,
+        project=request.project,
+        k=options.k,
+        prefer=options.prefer,
+    )
+    hits = [
+        SearchHit(
+            unique_id=hit.unique_id,
+            display_name=hit.display_name,
+            resource_type=hit.resource_type,
+            owner=hit.owner,
+            owner_source=hit.owner_source,
+            score=round(hit.score, 4),
+            match=hit.kind,
+            via=hit.via,
+        )
+        for hit in result.hits
+    ]
+    weak = result.mode == "semantic" and (not hits or hits[0].score < options.low_confidence_below)
+    if not hits:
+        message = "No node's name, description, columns or SQL matched the question."
+    elif weak:
+        message = (
+            f"The best match scores {hits[0].score:.3f}, under {options.low_confidence_below}: "
+            "the data asked about may not be in this project. Check the matches before using one."
+        )
+    elif result.mode == "keyword":
+        message = "Matched by keywords only, which often misses; check the matches before use."
+    else:
+        message = f"{len(hits)} nodes ranked by how well their text matches the question."
+    response = SearchResponse(
+        mode=result.mode,
+        model=result.model,
+        hits=hits,
+        low_confidence=weak or result.mode == "keyword",
+        message=message,
+        note=result.note,
+    )
+    return {"response": response}
+
+
 def build_graph(checkpointer: BaseCheckpointSaver | None = None) -> CompiledStateGraph:
     graph = StateGraph(AskState, context_schema=AskContext)
     graph.add_node("begin", begin)
@@ -338,20 +453,32 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None) -> CompiledStat
     graph.add_node("clarify", clarify)
     graph.add_node("lineage", walk)
     graph.add_node("answer", answer)
+    graph.add_node("owner", owner)
+    graph.add_node("search", find)
 
     graph.add_edge(START, "begin")
     graph.add_conditional_edges("begin", route_input, ["read_fields", "parse"])
     graph.add_edge("read_fields", "resolve")
-    graph.add_conditional_edges("parse", after_parse, ["abstain", "lineage", "resolve"])
-    graph.add_conditional_edges("resolve", after_resolve, ["lineage", "clarify"])
-    graph.add_conditional_edges("clarify", after_clarify, ["lineage", END])
+    graph.add_conditional_edges(
+        "parse", after_parse, ["abstain", "search", "lineage", "owner", "resolve"]
+    )
+    graph.add_conditional_edges("resolve", after_resolve, ["lineage", "owner", "clarify"])
+    graph.add_conditional_edges("clarify", after_clarify, ["lineage", "owner", END])
     graph.add_edge("lineage", "answer")
-    for last in ("abstain", "answer"):
+    for last in ("abstain", "answer", "owner", "search"):
         graph.add_edge(last, END)
     return graph.compile(checkpointer=checkpointer)
 
 
 ASK_GRAPH = build_graph()
+
+
+def search_options(settings: Settings) -> SearchOptions:
+    return SearchOptions(
+        embedder=get_embedder(settings),
+        prefer=tuple(settings.search_preferred_paths),
+        low_confidence_below=settings.search_low_confidence_below,
+    )
 
 
 def thread_config(thread_id: UUID) -> dict:
@@ -370,9 +497,12 @@ def run_ask(
     max_named: int,
     graph: CompiledStateGraph = ASK_GRAPH,
     thread_id: UUID | None = None,
+    search_options: SearchOptions = SearchOptions(),
 ) -> AskResponse:
     """Stateless unless thread_id is given, in which case graph must have a checkpointer."""
-    context = AskContext(conn, provider, max_named, resumable=thread_id is not None)
+    context = AskContext(
+        conn, provider, max_named, resumable=thread_id is not None, search=search_options
+    )
     if thread_id is None:
         final = graph.invoke(
             {"request": request}, context=context, config={"recursion_limit": RECURSION_LIMIT}

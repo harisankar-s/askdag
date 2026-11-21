@@ -1,0 +1,157 @@
+# Hand-written search questions for the Cal-ITP sample project (Phase 2, ADR 0012).
+# Each question is asked in a user's words, not copied from a description.
+# expected: model names; any of them in the top k counts as a hit. Empty means nothing in the
+# project answers it, and search should say so.
+# category says where the answer lives:
+#   described     the model's description, in other words
+#   column        only in column names or column descriptions
+#   jargon        the user's word differs from the domain term (GTFS, NTD, payments)
+#   undescribed   the model has no real description; only its name and SQL carry the answer
+#   unanswerable  nothing in the project
+# These are our own questions about the project; they contain no Cal-ITP text.
+version: 1
+project: calitp_warehouse
+questions:
+  - id: d01
+    category: described
+    question: Where can I see every attempt we made to fetch a schedule zip file, including the ones that failed?
+    expected: [fct_schedule_feed_downloads]
+  - id: d02
+    category: described
+    question: Which feed version should I use when analysing a particular day?
+    expected: [fct_daily_schedule_feeds]
+  - id: d03
+    category: described
+    question: Which model has one row for every trip that was planned to run on each date?
+    expected: [fct_scheduled_trips]
+  - id: d04
+    category: described
+    question: How accurate were the real-time arrival predictions at each stop?
+    expected: [fct_stop_time_metrics, fct_trip_updates_stop_metrics]
+  - id: d05
+    category: described
+    question: Which table lists the disruption notices riders were sent each day?
+    expected: [fct_daily_service_alerts, fct_service_alerts_messages, fct_service_alerts_messages_unnested]
+  - id: d06
+    category: described
+    question: Where are card payments that riders disputed through their bank?
+    expected: [fct_payments_chargeback_transactions]
+  - id: d07
+    category: described
+    question: Which table groups the fares that were charged to a card together in one go?
+    expected: [fct_payments_aggregations, fct_payments_aggregations_enghouse]
+  - id: d08
+    category: described
+    question: Where is the list of agreements between agencies and their technology vendors?
+    expected: [dim_contracts]
+  - id: d09
+    category: described
+    question: Which model tells me which agency owns a given fare reader device?
+    expected: [dim_payment_device_mapping]
+  - id: d10
+    category: described
+    question: Which government grants paid for each agency's running costs and new equipment over the years?
+    expected: [fct_operating_and_capital_funding_time_series, fct_operating_and_capital_funding_time_series_summary_total]
+  - id: d11
+    category: described
+    question: Where are serious accidents and assaults with injuries or deaths recorded?
+    expected: [fct_major_safety_events, fct_fra_regulated_mode_major_security_events]
+  - id: d12
+    category: described
+    question: Which schedule datasets are about to run out of dates and need a ticket opened?
+    expected: [fct_create_expiring_gtfs_issues]
+  - id: d13
+    category: described
+    question: Which agencies appear on the Mobility Marketplace provider map?
+    expected: [dim_mobility_mart_providers]
+    notes: easy control; the question shares the model's own words
+  - id: c01
+    category: column
+    question: Which tables say whether you can board at a stop in a wheelchair?
+    expected: [dim_stops, dim_stops_latest]
+  - id: c02
+    category: column
+    question: Where is the farebox recovery ratio for each agency and mode?
+    expected: [fct_service_data_and_operating_expenses_time_series_by_mode]
+  - id: c03
+    category: column
+    question: How much did each BigQuery query cost us?
+    expected: [fct_bigquery_data_access, fct_bigquery_data_access_referenced_tables]
+  - id: c04
+    category: column
+    question: How many minutes apart do buses run on routes with a fixed interval?
+    expected: [dim_frequencies, dim_frequencies_latest]
+  - id: c05
+    category: column
+    question: Do we know how full the buses are?
+    expected: [fct_vehicle_locations, fct_vehicle_positions_messages]
+  - id: c06
+    category: column
+    question: Which table has the latitude and longitude of every stop?
+    expected: [dim_stops, dim_stops_latest]
+  - id: j01
+    category: jargon
+    question: Where's the timetable, the time each bus reaches each stop?
+    expected: [dim_stop_times, dim_stop_times_latest]
+  - id: j02
+    category: jargon
+    question: Which table has the line I would draw on a map for each route?
+    expected: [dim_shapes_arrays, dim_shapes, fct_monthly_routes, fct_daily_scheduled_shapes]
+  - id: j03
+    category: jargon
+    question: How many people rode transit each month?
+    expected: [fct_complete_monthly_ridership_with_adjustments_and_estimates]
+  - id: j04
+    category: jargon
+    question: Where are the bus GPS pings in the format we publish to other agencies?
+    expected: [fct_tides_vehicle_locations]
+  - id: j05
+    category: jargon
+    question: Where are the individual rides paid by tapping a bank card?
+    expected: [fct_payments_rides_v2, fct_payments_rides_enghouse]
+  - id: u01
+    category: undescribed
+    question: How often do vehicles have mechanical failures while in service?
+    expected: [fct_breakdowns, fct_breakdowns_by_agency]
+  - id: u02
+    category: undescribed
+    question: How much diesel and electricity did each agency use?
+    expected: [fct_fuel_and_energy, fct_fuel_and_energy_by_agency]
+  - id: u03
+    category: undescribed
+    question: How old are the buses in each agency's fleet?
+    expected: [fct_vehicles_age_distribution, fct_asset_inventory_time_series_avg_fleet_age]
+  - id: u04
+    category: undescribed
+    question: How many staff does each agency employ, by mode?
+    expected: [fct_employees_by_mode, fct_employees_by_mode_and_employee_type]
+  - id: u05
+    category: undescribed
+    question: Where are the garages and repair buildings listed?
+    expected: [fct_maintenance_facilities, fct_maintenance_facilities_by_agency]
+  - id: u06
+    category: undescribed
+    question: How many miles of rail track does each agency have?
+    expected: [fct_track_and_roadway_by_agency, fct_track_and_roadway_by_mode]
+  - id: n01
+    category: unanswerable
+    question: Where are the results of rider satisfaction surveys?
+    expected: []
+  - id: n02
+    category: unanswerable
+    question: Which table has bike share and e-scooter trips?
+    expected: []
+    notes: near miss; dim_trips has a bikes_allowed column, which is not bike share
+  - id: n03
+    category: unanswerable
+    question: Do we keep rider complaint tickets anywhere?
+    expected: []
+  - id: n04
+    category: unanswerable
+    question: Which model tracks airport flight delays?
+    expected: []
+  - id: n05
+    category: unanswerable
+    question: How much carbon does each bus emit?
+    expected: []
+    notes: near miss; the fuel and energy tables are close but hold no emissions

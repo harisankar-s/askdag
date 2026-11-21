@@ -1,4 +1,4 @@
-"""The /api/ask contract: one request shape, and three kinds of answer told apart by `kind`."""
+"""The /api/ask contract: one request shape, and five kinds of answer told apart by `kind`."""
 
 from typing import Annotated, Literal, Self
 from uuid import UUID
@@ -198,7 +198,47 @@ class ClarificationResponse(BaseModel):
     thread_id: UUID | None = None
 
 
-AbstainReason = Literal["not_lineage", "not_understood", "llm_off", "llm_unavailable"]
+class OwnerResponse(BaseModel):
+    """Written by code from the nodes table; no LLM text."""
+
+    kind: Literal["owner"] = "owner"
+    node: NodeInfo
+    owner: str | None  # None: no owner recorded in dbt or the owners file
+    owner_source: str | None
+    owner_source_meaning: str | None
+    message: str
+    attempts: list[AttemptInfo] = []
+    thread_id: UUID | None = None
+
+
+class SearchHit(BaseModel):
+    unique_id: str
+    display_name: str
+    resource_type: str
+    owner: str | None
+    owner_source: str | None
+    score: float  # cosine similarity for semantic; ts_rank for keyword; not comparable
+    match: str  # the chunk kind that matched best: summary, columns or sql
+    via: str | None = None  # the staging model or source that lifted this mart
+
+
+class SearchResponse(BaseModel):
+    """Nodes whose text matches what the question describes, ranked; written by code."""
+
+    kind: Literal["search"] = "search"
+    mode: Literal["semantic", "keyword"]
+    model: str | None  # the vectors' tag in semantic mode
+    hits: list[SearchHit]
+    # True when the best match is weak (semantic: top score under the cutoff) or keyword
+    # search ran; the data asked about may not be in the project.
+    low_confidence: bool
+    message: str
+    note: str | None = None
+    attempts: list[AttemptInfo] = []
+    thread_id: UUID | None = None
+
+
+AbstainReason = Literal["out_of_scope", "not_understood", "llm_off", "llm_unavailable"]
 
 
 class AbstainResponse(BaseModel):
@@ -210,5 +250,6 @@ class AbstainResponse(BaseModel):
 
 
 AskResponse = Annotated[
-    LineageResponse | ClarificationResponse | AbstainResponse, Field(discriminator="kind")
+    LineageResponse | OwnerResponse | SearchResponse | ClarificationResponse | AbstainResponse,
+    Field(discriminator="kind"),
 ]

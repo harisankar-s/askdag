@@ -1,4 +1,5 @@
-"""POST /api/ask: a question in; a lineage answer, a clarification or an abstention out."""
+"""POST /api/ask: a question in; a lineage, owner or search answer, a clarification or an
+abstention out."""
 
 from collections.abc import Iterator
 from functools import lru_cache
@@ -8,7 +9,13 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException
 from langgraph.graph.state import CompiledStateGraph
 
-from asklineage.api.flow import build_graph, run_ask, waiting_for_choice
+from asklineage.api.flow import (
+    SearchOptions,
+    build_graph,
+    run_ask,
+    search_options,
+    waiting_for_choice,
+)
 from asklineage.api.models import AskRequest, AskResponse
 from asklineage.api.threads import create_thread, make_saver, touch_thread, try_lock_thread
 from asklineage.config import get_settings
@@ -30,6 +37,11 @@ def get_llm() -> LLMProvider | None:
 
 
 @lru_cache
+def get_search() -> SearchOptions:
+    return search_options(get_settings())
+
+
+@lru_cache
 def get_thread_graph() -> CompiledStateGraph:
     return build_graph(checkpointer=make_saver(get_checkpoint_pool()))
 
@@ -40,10 +52,11 @@ def ask(
     conn: Annotated[psycopg.Connection, Depends(get_conn)],
     provider: Annotated[LLMProvider | None, Depends(get_llm)],
     thread_graph: Annotated[CompiledStateGraph, Depends(get_thread_graph)],
+    search: Annotated[SearchOptions, Depends(get_search)],
 ) -> AskResponse:
     max_named = get_settings().llm_max_named_nodes
     if not request.start_thread and request.thread_id is None:
-        return run_ask(conn, provider, request, max_named=max_named)
+        return run_ask(conn, provider, request, max_named=max_named, search_options=search)
 
     if request.start_thread:
         thread_id = create_thread(conn)
@@ -56,5 +69,11 @@ def ask(
         if request.choose and not waiting_for_choice(thread_graph, thread_id):
             raise HTTPException(409, "This thread is not waiting for a choice.")
     return run_ask(
-        conn, provider, request, max_named=max_named, graph=thread_graph, thread_id=thread_id
+        conn,
+        provider,
+        request,
+        max_named=max_named,
+        graph=thread_graph,
+        thread_id=thread_id,
+        search_options=search,
     )

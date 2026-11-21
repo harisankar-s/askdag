@@ -1,4 +1,5 @@
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS manifest_loads (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -73,3 +74,22 @@ CREATE TABLE IF NOT EXISTS ask_threads (
 );
 
 CREATE INDEX IF NOT EXISTS ask_threads_last_used_idx ON ask_threads (last_used_at);
+
+-- Embedded chunks of node text for semantic search (ADR 0012). No foreign key to nodes:
+-- load-manifest replaces every node, and a cascade would throw the embeddings away each time.
+-- `asklineage embed` re-embeds only changed chunks and deletes those of nodes that are gone.
+-- The dimension must match EMBED_DIMENSIONS; changing it needs a manual migration.
+CREATE TABLE IF NOT EXISTS node_chunks (
+    node_id text NOT NULL,
+    project_name text NOT NULL,
+    kind text NOT NULL CHECK (kind IN ('summary', 'columns', 'sql')),
+    ordinal integer NOT NULL CHECK (ordinal >= 0),
+    content text NOT NULL,
+    content_sha text NOT NULL,
+    model text NOT NULL,
+    embedding vector(768) NOT NULL,
+    embedded_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (node_id, kind, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS node_chunks_project_idx ON node_chunks (project_name);

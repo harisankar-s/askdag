@@ -11,6 +11,7 @@ from asklineage.answer.parse import (
     entity_in_question,
     keep_first_reading,
     name_tokens,
+    named_node_wins,
     parse_question,
     recover_reading,
 )
@@ -25,11 +26,11 @@ def parsed(
     entity="stg_orders",
     direction=Direction.DOWNSTREAM,
     depth=None,
-    is_lineage=True,
+    intent="lineage",
     same_node=False,
 ):
     return ParsedQuestion(
-        is_lineage=is_lineage,
+        intent=intent,
         same_node=same_node,
         entity=entity,
         direction=direction,
@@ -191,10 +192,25 @@ def test_a_lineage_question_needs_an_entity_and_a_direction():
     assert rules(violations) == ["missing_entity", "missing_direction"]
 
 
-def test_a_question_that_is_not_lineage_needs_nothing_else():
-    reply = parsed(entity=None, direction=None, is_lineage=False)
+@pytest.mark.parametrize("intent", ["search", "other"])
+def test_search_and_other_need_nothing_else(intent):
+    reply = parsed(entity=None, direction=None, intent=intent)
 
     assert check_parse(reply, "What's the weather?") == []
+
+
+def test_an_owner_question_needs_an_entity_but_no_direction():
+    question = "Who owns stg_orders?"
+
+    assert check_parse(parsed(direction=None, intent="owner"), question) == []
+    missing = check_parse(parsed(entity=None, direction=None, intent="owner"), question)
+    assert rules(missing) == ["missing_entity"]
+
+
+def test_an_owner_follow_up_can_use_the_previous_node():
+    follow_up = parsed(entity=None, direction=None, intent="owner", same_node=True)
+
+    assert check_parse(follow_up, "Who owns it?", PREVIOUS) == []
 
 
 def test_parse_retries_once_with_the_problem():
@@ -218,3 +234,24 @@ def test_depth_out_of_range_fails_schema_validation_and_is_retried():
 
     assert generated.output is None
     assert rules(generated.attempts[0].violations) == ["invalid_output"]
+
+
+def test_a_named_node_wins_over_same_node():
+    question = "And what does fct_orders feed?"
+    first = parsed("fct_orders", same_node=True)
+    clash = Violation(None, "same_node_entity", "x")
+    retry = Attempt((Violation(None, "same_node_names_another_node", "x"),), output=parsed(None))
+
+    repaired = named_node_wins(Generated(None, (Attempt((clash,), output=first), retry)), question)
+
+    assert (repaired.entity, repaired.same_node) == ("fct_orders", False)
+
+
+def test_a_named_node_only_wins_when_it_is_in_the_question_and_the_only_problem():
+    clash = Violation(None, "same_node_entity", "x")
+    other = Violation(None, "missing_direction", "x")
+    invented = Attempt((clash,), output=parsed("fct_orders", same_node=True))
+    two = Attempt((clash, other), output=parsed("fct_orders", same_node=True))
+
+    assert named_node_wins(Generated(None, (invented,)), "And downstream?") is None
+    assert named_node_wins(Generated(None, (two,)), "And what does fct_orders feed?") is None

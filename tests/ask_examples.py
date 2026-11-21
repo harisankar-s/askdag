@@ -20,7 +20,7 @@ QUESTION = "What breaks if I change stg_orders?"
 
 def parse_reply(entity="stg_orders", direction="downstream", depth=None, *, same_node=False):
     return {
-        "is_lineage": True,
+        "intent": "lineage",
         "same_node": same_node,
         "entity": entity,
         "direction": direction,
@@ -30,12 +30,24 @@ def parse_reply(entity="stg_orders", direction="downstream", depth=None, *, same
 
 PARSE = parse_reply()
 NOT_LINEAGE = {
-    "is_lineage": False,
+    "intent": "other",
     "same_node": False,
     "entity": None,
     "direction": None,
     "depth": None,
 }
+
+
+def owner_reply(entity="stg_orders", *, same_node=False):
+    return {
+        "intent": "owner",
+        "same_node": same_node,
+        "entity": entity,
+        "direction": None,
+        "depth": None,
+    }
+
+
 HIGHLIGHTS = {
     "claims": [
         {

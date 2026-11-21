@@ -56,6 +56,8 @@ button:disabled { opacity: 0.5; cursor: default; }
 .note { padding: 8px 12px; border-radius: 8px; margin: 10px 0; font-size: 0.88rem;
   background: var(--warn-bg); color: var(--warn); }
 .error { background: var(--err-bg); color: var(--err); }
+button.link { background: none; border: none; padding: 0; color: inherit; cursor: pointer;
+              font-family: ui-monospace, monospace; text-decoration: underline; }
 .tag { font-size: 0.72rem; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px;
   color: var(--muted); margin-left: 6px; white-space: nowrap; font-weight: 400; }
 table { border-collapse: collapse; width: 100%; font-size: 0.88rem; margin-top: 10px; }
@@ -322,6 +324,38 @@ function renderClarification(r) {
   ];
 }
 
+function renderOwner(r) {
+  return [
+    el("p", { class: "asked" }, "Owner of " + r.node.display_name,
+       el("span", { class: "tag" }, r.node.resource_type)),
+    el("p", { class: "summary" }, r.message),
+    r.owner === null ? el("div", { class: "note" },
+      "Neither dbt (meta.owner or a group) nor the owners file assigns an owner to this node.") : null,
+  ];
+}
+
+function renderSearch(r) {
+  const how = r.mode === "semantic" ? "semantic, " + r.model : "keyword";
+  const parts = [
+    el("p", { class: "asked" }, "Matches for the question", el("span", { class: "tag" }, how)),
+    el("p", {}, r.message),
+  ];
+  if (r.low_confidence) {
+    parts.push(el("div", { class: "note" }, "Low confidence: the data may not be in this project."));
+  }
+  if (r.note) parts.push(el("div", { class: "muted" }, r.note));
+  if (!r.hits.length) return parts;
+  parts.push(table(["Score", "Match", "Name", "Owner", "Via"], r.hits.map((h) => {
+    const ask = el("button", { type: "button", class: "link",
+      onclick: () => send({ node: h.unique_id }, "Search: " + h.display_name) }, h.display_name);
+    return [h.score.toFixed(3), h.match, ask,
+      h.owner === null ? el("span", { class: "muted" }, "no owner recorded") : h.owner,
+      h.via === null ? "–" : el("code", {}, h.via)];
+  })));
+  parts.push(el("div", { class: "muted" }, "Click a name to see what depends on it."));
+  return parts;
+}
+
 function renderAbstain(r) {
   return [el("p", { class: "asked" }, "No answer (" + r.reason + ")"), el("p", {}, r.message)];
 }
@@ -375,7 +409,8 @@ async function send(body, label) {
       return;
     }
     if (data.thread_id) setThread(data.thread_id);
-    const render = { lineage: renderLineage, clarification: renderClarification, abstain: renderAbstain };
+    const render = { lineage: renderLineage, owner: renderOwner, search: renderSearch,
+                     clarification: renderClarification, abstain: renderAbstain };
     addCard(label, [...render[data.kind](data), renderAttempts(data.attempts)]);
   } catch (err) {
     addCard(label, [el("div", { class: "note error" }, "Request failed: " + err.message)]);
