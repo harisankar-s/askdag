@@ -143,6 +143,7 @@ class AttemptInfo(BaseModel):
     passed: bool
     error: str | None = None
     violations: list[str] = []
+    rules: list[str] = []  # the rule each violation broke, in the same order
     model: str | None = None
     latency_ms: int | None = None
     input_tokens: int | None = None
@@ -155,6 +156,7 @@ class AttemptInfo(BaseModel):
             passed=attempt.passed,
             error=attempt.error,
             violations=[str(violation) for violation in attempt.violations],
+            rules=[violation.rule for violation in attempt.violations],
             model=attempt.model,
             latency_ms=attempt.latency_ms,
             input_tokens=attempt.input_tokens,

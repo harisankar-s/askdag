@@ -143,6 +143,7 @@ def _ask_turn(
         index=context.index,
         owners=context.owners,
         previous_node=previous_node,
+        max_named=context.max_named,
     )
     if "choose" in turn.request and not waiting_for_choice(flow, thread_id):
         return score(None, blocked=True)

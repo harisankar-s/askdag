@@ -17,6 +17,7 @@ from typing import Literal
 
 from asklineage.api.models import AskResponse, LineageResponse
 from asklineage.eval.golden import Expect, GoldenItem, NameIndex, Turn
+from asklineage.eval.highlights import HighlightScore, score_highlights
 from asklineage.eval.truth import TruthGraph, walk
 
 Outcome = Literal["correct", "acceptable", "safe_wrong", "silent_wrong", "blocked", "error"]
@@ -49,6 +50,7 @@ class TurnScore:
     suggestion_rank: int | None = None  # 1-based; 0 when the expected node wasn't suggested
     reused_previous: bool = False  # a follow-up naming a new node was answered about the old one
     highlight_status: str | None = None
+    highlights: HighlightScore | None = None
     attempts: tuple[dict, ...] = ()
     seconds: float = 0.0
     response: dict | None = None
@@ -127,6 +129,7 @@ def score_turn(
     index: NameIndex,
     owners: Mapping[str, str | None],
     previous_node: str | None = None,
+    max_named: int = 20,
     seconds: float = 0.0,
     error: str | None = None,
     blocked: bool = False,
@@ -208,6 +211,7 @@ def score_turn(
             "facts_ok": facts_ok,
             "reused_previous": reused,
             "highlight_status": str(response.highlight_status),
+            "highlights": score_highlights(response, graph, max_named, f"{item.id}:{number}"),
         }
 
     return TurnScore(
