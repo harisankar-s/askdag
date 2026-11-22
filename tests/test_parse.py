@@ -10,6 +10,7 @@ from asklineage.answer.parse import (
     clean_entity,
     entity_in_question,
     keep_first_reading,
+    keep_previous_direction,
     name_tokens,
     named_node_wins,
     parse_question,
@@ -255,3 +256,31 @@ def test_a_named_node_only_wins_when_it_is_in_the_question_and_the_only_problem(
 
     assert named_node_wins(Generated(None, (invented,)), "And downstream?") is None
     assert named_node_wins(Generated(None, (two,)), "And what does fct_orders feed?") is None
+
+
+@pytest.mark.parametrize(
+    "question",
+    ["What about payments_entity_mapping?", "And `fct_orders`?", "What about dim_schedule_feeds?"],
+)
+def test_a_follow_up_with_no_direction_word_keeps_the_previous_direction(question):
+    reading = parsed("x", direction=Direction.UPSTREAM)
+
+    assert keep_previous_direction(reading, question, PREVIOUS).direction is None
+
+
+@pytest.mark.parametrize(
+    "question",
+    ["And what does fct_orders feed?", "Where does fct_orders come from?", "fct_orders upstream?"],
+)
+def test_a_follow_up_that_says_a_direction_keeps_the_models_reading(question):
+    reading = parsed("fct_orders", direction=Direction.UPSTREAM)
+
+    assert keep_previous_direction(reading, question, PREVIOUS) is reading
+
+
+def test_without_a_previous_question_or_for_owners_the_reading_is_unchanged():
+    lineage = parsed("fct_orders", direction=Direction.UPSTREAM)
+    owner = parsed("fct_orders", direction=None, intent="owner")
+
+    assert keep_previous_direction(lineage, "What about fct_orders?", None) is lineage
+    assert keep_previous_direction(owner, "What about fct_orders?", PREVIOUS) is owner

@@ -37,6 +37,7 @@ from asklineage.answer.parse import (
     PreviousQuestion,
     clean_entity,
     keep_first_reading,
+    keep_previous_direction,
     named_node_wins,
     parse_question,
     recover_reading,
@@ -246,7 +247,9 @@ def parse(state: AskState, runtime: Runtime[AskContext]) -> AskState:
         or named_node_wins(generated, question)
     )
     if parsed is not None:
-        parsed = keep_first_reading(generated, parsed)
+        parsed = keep_previous_direction(
+            keep_first_reading(generated, parsed), question, asked_before
+        )
     if parsed is None:
         reason = "llm_unavailable" if generated.attempts[-1].error else "not_understood"
         return {"abstain_reason": reason, "attempts": attempts}

@@ -19,5 +19,8 @@ def get_provider(settings: Settings) -> LLMProvider | None:
                 max_retries=1,
             )
             return OpenAICompatibleProvider(
-                client, settings.llm_model, settings.llm_response_format
+                client,
+                settings.llm_model,
+                settings.llm_response_format,
+                settings.llm_temperature,
             )

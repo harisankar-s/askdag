@@ -37,7 +37,9 @@ def completion_body(content: str, finish_reason: str = "stop") -> dict:
 
 
 def make_provider(
-    handler: Callable[[httpx2.Request], httpx2.Response], response_format="json_schema"
+    handler: Callable[[httpx2.Request], httpx2.Response],
+    response_format="json_schema",
+    temperature: float | None = 0.0,
 ) -> tuple[OpenAICompatibleProvider, list[dict]]:
     sent: list[dict] = []
 
@@ -51,7 +53,7 @@ def make_provider(
         max_retries=0,
         http_client=openai.DefaultHttpxClient(transport=httpx2.MockTransport(record)),
     )
-    return OpenAICompatibleProvider(client, "test-model", response_format), sent
+    return OpenAICompatibleProvider(client, "test-model", response_format, temperature), sent
 
 
 def test_valid_reply_is_parsed_with_usage():
@@ -85,6 +87,23 @@ def test_request_carries_schema_in_prompt_and_response_format():
     assert body["messages"][1] == {"role": "user", "content": "facts here"}
     assert body["response_format"]["type"] == "json_schema"
     assert body["response_format"]["json_schema"]["name"] == "Reply"
+
+
+def test_temperature_none_is_left_out_of_the_request():
+    provider, sent = make_provider(
+        lambda _: httpx2.Response(200, json=completion_body('{"summary": "ok", "count": 1}')),
+        temperature=None,
+    )
+
+    provider.complete_json(system="", prompt="", output=Reply)
+
+    assert "temperature" not in sent[0]
+
+
+def test_null_in_the_environment_turns_temperature_off(monkeypatch):
+    monkeypatch.setenv("LLM_TEMPERATURE", "null")
+
+    assert Settings(_env_file=None).llm_temperature is None
 
 
 @pytest.mark.parametrize(

@@ -38,6 +38,7 @@ What the change gives up is anything the LLM might have added outside the rule, 
 | Code to keep | ~70 lines | prompt, checker, retry | prompt, checker, retry, eval |
 
 ## Consequences
+- **Measured afterwards** (qwen2.5:7b golden run, 63 turns, ADR 0020): wall time per turn fell from p50 3.9 s / p95 6.8 s to **p50 0.67 s / p95 1.53 s**, and table and facts stayed 39/39.
 - **A lineage answer is the same with or without an LLM.** A request that names the node (`{"node": ...}`) never touches a model, and `LLM_PROVIDER=none` loses only free-text questions and history summaries.
 - **Highlights are deterministic,** so tests assert exact sentences, and a direct highlight is checked to be an edge of the result.
 - **The rule is crude.** It does not know which nodes are dashboards, exports or heavily used. A better rule would need data this build doesn't load (exposures, query logs), and that data would go into the rule, not into a prompt.

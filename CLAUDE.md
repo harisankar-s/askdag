@@ -41,6 +41,7 @@ uv run asklineage lineage dim_schedule_feeds --direction downstream --depth 2
 uv run asklineage lineage dim_schedule_feeds --direction downstream --depth 2 --summarize
 uv run python scripts/manifest_stats.py data/manifests/calitp/manifest.json
 uv run asklineage llm-check
+LLM_PROVIDER=openai_compatible LLM_BASE_URL=https://api.anthropic.com/v1/ LLM_MODEL=claude-haiku-5-5 LLM_TEMPERATURE=null LLM_RESPONSE_FORMAT=off uv run asklineage llm-check
 uv run asklineage embed-check
 uv run asklineage embed
 uv run asklineage search "Which table has the latitude and longitude of every stop?"
@@ -93,7 +94,7 @@ Key design rules:
 | 2 | pgvector semantic search + question classifier | Done |
 | 3 | Incident retrieval: synthetic corpus, hybrid search, cited "has it broken before?" answers | Done |
 | 4 | Change awareness: manifest diff and incremental refresh; a tiny second project as the reader quickstart | Done |
-| 5 | Measured experiments on existing evals: HNSW vs exact scan, a second LLM, highlights chosen in code | In progress (5a, 5b done) |
+| 5 | Measured experiments on existing evals: HNSW vs exact scan, a second LLM, highlights chosen in code | Done |
 | 6 | Release: one-command Docker stack, API key and tracing, cheap evals in CI, README, demo, article | Planned |
 
 Phase 1 is built (steps 1 to 8); the history and numbers live in ADRs 0001–0011 and the README, so they aren't repeated here. What to know when coding:
@@ -125,7 +126,7 @@ Phases 4–6 (slim; cut items are argued in ADRs, not built):
 - 5 three experiments, each one table in an ADR, each on an eval that already exists: pgvector HNSW vs exact scan (recall@k and latency on the search and incident sets); a hosted model vs qwen2.5:7b on the golden set; highlights chosen in code vs by the LLM (existing highlight eval). Cut: Pinecone (argued, not run), column-level lineage (named as a limitation; needs compiled SQL, which `dbt parse` doesn't give)
   - 5a (ADR 0018) — done. The old `DISTINCT ON` vector query could never use an index; `search/scan.py` adds `SEARCH_VECTOR_SCAN` = exact | topn (nearest `k x SEARCH_OVERFETCH` chunks, index scans off) | hnsw (same SQL, index forced; `SEARCH_HNSW_EF_SEARCH=100`); settings scoped per query in a savepoint. HNSW indexes on both chunk tables in `schema.sql`. Evals take `--scan`/`--overfetch`, time SQL only (`WarmEmbedder`). `eval vector-scale` pads a scratch copy of the chunks (noise per copy) and reports exact vs HNSW latency, strict and tie-aware recall per `ef_search`. Cal-ITP: every scan matches exact on every metric; topn p95 8.0 vs exact 16.7 ms. Scale: exact p95 46 ms at 30k, 88 at 100k; HNSW 1–5 ms; recall at 100k, ef 100: 0.978 (noise 1.0) but ~0.27 with near-duplicates (noise 0.3). Default topn; switch to hnsw near 10k chunks after running the bench on your data. Planner picks HNSW itself from 30k, so it is never left to choose
   - 5b (ADR 0019) — done, argued, not run: the selection rule was fully written in the prompt and the check left the sentence nothing beyond (upstream, downstream, hops), so `answer/highlights.py` applies the rule and a template writes the sentence. Removed: highlight prompt, `grounding.py`, highlight eval, `highlight_status`, `LLM_MAX_NAMED_NODES`, named-node list, `--summarize -v`. Lineage answers make no LLM call (was p50 4.5 s per answer)
-  - 5c last: second LLM on the golden set (qwen2.5:7b is at 59/60; now only parse and history use the LLM, so compare intent accuracy, history citation pass rate, retries, latency, cost); hosted provider not chosen yet
+  - 5c (ADR 0020) — done. Claude Haiku 5.5 through the existing adapter (`LLM_BASE_URL=https://api.anthropic.com/v1/`, `LLM_RESPONSE_FORMAT=off` since the endpoint only takes strict schemas, new `LLM_TEMPERATURE=null` since it rejects temperature). Golden 63 turns: qwen 61/1/1 (one follow-up direction flip, right in the two earlier runs), Haiku 62/1/0; parse retries 4 vs 1; parse p50 683 vs 712 ms; wall p50 0.67 vs 0.71 s. qwen stays default (no key, local, within noise). Then `keep_previous_direction` (parse.py): a lineage follow-up with no direction cue word keeps the previous direction, whatever the model said. After 5b, wall time per turn fell from p50 3.9 s to 0.67 s
 - 6 `docker compose up` runs app + Postgres (+ optional Ollama) from a clean clone; an API-key dependency on `/api/*` to show the pattern; OpenTelemetry spans per flow node and LLM/embedding call (console or Jaeger in compose); CI runs conformance and the retrieval evals with `HashingEmbedder` (no LLM); README quickstart, demo video, launch post and article from the ADRs. Cut: real auth, cloud deployment, bigger golden set, hand labels, LLM-as-judge
 
 ## Evaluation approach
@@ -158,3 +159,4 @@ No LLM-as-judge and no hand-labelled answer set in this build; the ADRs say why.
 - `0017` Change awareness: in-memory manifest diff, data vs docs-only changes, refresh as three documented commands, a hand-written quickstart project
 - `0018` Vector scan: nearest-chunks query without an index by default (topn), HNSW past ~10k chunks with ef_search 100, never left to the planner; near-duplicates are HNSW's risk
 - `0019` Highlights chosen by a code rule and written from a template; lineage answers need no LLM
+- `0020` Second LLM: Claude Haiku 5.5 via the OpenAI-compatible endpoint matches qwen2.5:7b within noise; local stays default

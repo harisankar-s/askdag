@@ -18,6 +18,15 @@ from asklineage.llm.base import LLMProvider
 MAX_QUESTION_CHARS = 500
 BACKTICKED = re.compile(r"`([^`]+)`")
 NAME_LIKE = re.compile(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*")
+# Any word that could say which way to walk. Broad on purpose: a follow-up overrides the model's
+# direction only when it has none of these, as in "What about fct_orders?" (ADR 0020).
+DIRECTION_CUES = re.compile(
+    r"\b(up|down|upstream|downstream|feeds?|fed|feeding|depends?|depending|dependents?|"
+    r"dependenc\w*|reads?|reading|uses?|used|using|consum\w*|break\w*|broke|affect\w*|"
+    r"impact\w*|from|into|sources?|comes?|origin\w*|parents?|child\w*|inputs?|outputs?|"
+    r"before|after|where|lineage)\b",
+    re.IGNORECASE,
+)
 
 # lineage and owner name a node; search describes data without naming one; history asks about
 # past incidents, named node or not (incident search reads the question itself); other is the rest.
@@ -255,6 +264,22 @@ def keep_first_reading(
     if "missing_direction" not in flagged:
         update["direction"] = first.direction
     return final.model_copy(update=update)
+
+
+def keep_previous_direction(
+    parsed: ParsedQuestion, question: str, previous: PreviousQuestion | None
+) -> ParsedQuestion:
+    """A lineage follow-up that gives no direction keeps the previous one, whatever the model
+    said: qwen2.5:7b read "What about x?" after a downstream question as upstream (ADR 0020).
+    Node names are left out of the search, so `dim_schedule_feeds` is not a cue."""
+    if previous is None or parsed.intent != "lineage" or parsed.direction is None:
+        return parsed
+    text = BACKTICKED.sub(" ", question)
+    for name in name_tokens(question):
+        text = text.replace(name, " ")
+    if DIRECTION_CUES.search(text):
+        return parsed
+    return parsed.model_copy(update={"direction": None})
 
 
 def recover_reading(generated: Generated[ParsedQuestion], question: str) -> ParsedQuestion | None:

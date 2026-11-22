@@ -1,4 +1,6 @@
-"""Adapter for any server that speaks the OpenAI chat-completions API: Ollama, vLLM, LiteLLM."""
+"""Adapter for any server that speaks the OpenAI chat-completions API: Ollama, vLLM, LiteLLM,
+and Anthropic's OpenAI-compatible endpoint (with LLM_RESPONSE_FORMAT=off and
+LLM_TEMPERATURE=null: it accepts only strict schemas, and newer models reject temperature)."""
 
 import json
 import time
@@ -18,11 +20,17 @@ SCHEMA_INSTRUCTION = "Reply with one JSON object that matches this JSON Schema, 
 
 class OpenAICompatibleProvider:
     def __init__(
-        self, client: openai.OpenAI, model: str, response_format: ResponseFormat = "json_schema"
+        self,
+        client: openai.OpenAI,
+        model: str,
+        response_format: ResponseFormat = "json_schema",
+        temperature: float | None = 0.0,
     ) -> None:
+        """temperature None leaves it out, for models that reject it."""
         self.model = model
         self._client = client
         self._response_format = response_format
+        self._temperature = temperature
 
     def complete_json[T: BaseModel](
         self, *, system: str, prompt: str, output: type[T]
@@ -36,8 +44,9 @@ class OpenAICompatibleProvider:
                 {"role": "system", "content": instructions},
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0,
         }
+        if self._temperature is not None:
+            request["temperature"] = self._temperature
         if self._response_format == "json_schema":
             request["response_format"] = {
                 "type": "json_schema",

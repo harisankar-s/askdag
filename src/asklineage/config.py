@@ -9,7 +9,8 @@ from asklineage.search.scan import Scan
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # "null" in the environment means None, e.g. LLM_TEMPERATURE=null.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_parse_none_str="null")
 
     database_url: str = "postgresql://asklineage:asklineage@localhost:5432/asklineage"
 
@@ -20,6 +21,8 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr = SecretStr("ollama")
     llm_timeout_seconds: float = 60.0
     llm_response_format: ResponseFormat = "json_schema"
+    # 0 keeps eval runs repeatable; null leaves it out, for models that reject it (newer Claude).
+    llm_temperature: float | None = Field(default=0.0, ge=0, le=2)
 
     embed_provider: Literal["none", "openai_compatible"] = "none"
     embed_base_url: str = "http://localhost:11434/v1"
