@@ -1,0 +1,4 @@
+# Hand-written incidents for the quickstart project (ADR 0014 format, no scaffold).
+version: 1
+project: shop
+seed: 0

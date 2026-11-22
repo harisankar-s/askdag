@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     embed_query_prefix: str = "search_query: "
     # Path patterns of the models users should query; a matching staging model or source lifts
     # them in semantic search. [] turns lineage-aware ranking off.
-    search_preferred_paths: list[str] = ["models/mart/*"]
+    search_preferred_paths: list[str] = ["models/mart/*", "models/marts/*"]
     # A semantic top score below this is flagged low confidence (ADR 0012: 0.667 caught 3 of 5
     # unanswerable Cal-ITP questions and blocked 1 of 30). A flag, not an abstain.
     search_low_confidence_below: float = Field(default=0.667, ge=0, le=1)

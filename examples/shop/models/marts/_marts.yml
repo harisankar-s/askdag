@@ -1,0 +1,46 @@
+version: 2
+
+groups:
+  - name: growth
+    owner:
+      name: Growth analytics
+      email: growth@example.com
+
+models:
+  - name: fct_orders
+    description: One row per real order (staff test orders excluded), with the amount actually paid.
+    config:
+      meta:
+        owner: finance
+    columns:
+      - name: order_id
+        data_tests: [unique, not_null]
+      - name: customer_id
+      - name: ordered_at
+      - name: status
+      - name: amount
+        description: Sum of successful payments for the order, in dollars.
+        data_tests: [not_null]
+  - name: fct_refunds
+    description: One row per refunded payment, with the refunded amount in dollars.
+    config:
+      meta:
+        owner: finance
+  - name: mart_revenue_daily
+    description: Gross revenue, refunds and net revenue by order date. Feeds the finance dashboard.
+    config:
+      meta:
+        owner: finance
+  - name: mart_orders_by_region
+    description: Orders and revenue by customer region and order date.
+    config:
+      group: growth
+  - name: dim_customers
+    description: One row per customer, with country, region and lifetime value.
+    config:
+      group: growth
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]
+      - name: region
+        description: Region from the country_codes seed; null when the country is unknown.

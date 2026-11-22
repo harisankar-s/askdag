@@ -9,3 +9,12 @@ calitp_warehouse:
       project: placeholder-project
       dataset: placeholder
       threads: 1
+
+# The quickstart project in examples/shop. Parsing never opens the file.
+shop:
+  target: parse
+  outputs:
+    parse:
+      type: duckdb
+      path: target/shop.duckdb
+      threads: 1

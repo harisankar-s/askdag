@@ -22,6 +22,8 @@ from asklineage.config import get_settings
 from asklineage.corpus.docs import CorpusError, check_corpus, load_corpus
 from asklineage.corpus.docs import describe as describe_corpus
 from asklineage.corpus.scaffold import scaffold, write_scaffold
+from asklineage.diff.compare import ProjectMismatchError, diff_manifests
+from asklineage.diff.report import diff_json, render_diff
 from asklineage.embed.base import EmbeddingError, cosine, index_name
 from asklineage.embed.chunks import CHUNK_KINDS
 from asklineage.embed.factory import get_embedder
@@ -90,6 +92,15 @@ def main(argv: list[str] | None = None) -> None:
     )
     show.add_argument(
         "-v", "--verbose", action="store_true", help="with --summarize, show each LLM attempt"
+    )
+    compare = commands.add_parser("diff", help="Compare two manifests and show what is downstream")
+    compare.add_argument("old", type=Path)
+    compare.add_argument("new", type=Path)
+    compare.add_argument("--owners", type=Path, help="YAML file of path-based owner rules")
+    compare.add_argument("--json", action="store_true", help="print the full diff as JSON")
+    compare.add_argument("--limit", type=int, default=50, help="rows shown per section")
+    compare.add_argument(
+        "--exit-code", action="store_true", help="exit 1 when the manifests differ, like git diff"
     )
     commands.add_parser("llm-check", help="Send one small request to the configured LLM")
     commands.add_parser("embed-check", help="Embed two documents and a question, and compare them")
@@ -178,6 +189,9 @@ def main(argv: list[str] | None = None) -> None:
     checks_depths = args.command == "eval" and args.eval_command == "conformance"
     if checks_depths and not all(1 <= depth <= MAX_DEPTH for depth in args.depths):
         parser.error(f"--depths must be between 1 and {MAX_DEPTH}")
+    if args.command == "diff":
+        _diff(args, parser)
+        return
     if args.command == "llm-check":
         _check_llm()
         return
@@ -517,6 +531,21 @@ def _corpus(args: argparse.Namespace) -> None:
         print(f"{len(report.problems)} problem(s), {len(report.drafts)} draft(s)")
         raise SystemExit(1)
     print("Every document agrees with the manifest.")
+
+
+def _diff(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if args.limit < 1:
+        parser.error("--limit must be at least 1")
+    rules = load_owner_rules(args.owners) if args.owners else ()
+    try:
+        old = parse_manifest(json.loads(args.old.read_text()), rules)
+        new = parse_manifest(json.loads(args.new.read_text()), rules)
+        diff = diff_manifests(old, new)
+    except (UnsupportedManifestError, ProjectMismatchError) as exc:
+        parser.error(str(exc))
+    print(json.dumps(diff_json(diff), indent=2) if args.json else render_diff(diff, args.limit))
+    if args.exit_code and not diff.is_empty:
+        raise SystemExit(1)
 
 
 def _load_manifest(

@@ -1,0 +1,37 @@
+version: 2
+
+sources:
+  - name: app
+    description: Tables replicated nightly from the shop's application database.
+    schema: app
+    tables:
+      - name: orders
+        description: One row per order placed in the app, including test orders.
+        columns:
+          - name: id
+            description: Order key.
+          - name: customer_id
+          - name: created_at
+          - name: status
+            description: placed, shipped, delivered or cancelled.
+          - name: is_test
+            description: True for orders placed by staff to test checkout.
+      - name: customers
+        description: One row per customer account.
+        columns:
+          - name: id
+            description: Customer key.
+          - name: email
+          - name: country
+            description: Two-letter country code from the signup form.
+          - name: created_at
+      - name: payments
+        description: One row per payment attempt, written by the payment service.
+        columns:
+          - name: id
+            description: Payment attempt key.
+          - name: order_id
+          - name: amount_cents
+          - name: method
+          - name: status
+            description: success, failed or refunded.
