@@ -144,7 +144,7 @@ class HighlightInfo(BaseModel):
 
 
 class AttemptInfo(BaseModel):
-    stage: Literal["parse", "highlights"]
+    stage: Literal["parse", "highlights", "history"]
     passed: bool
     error: str | None = None
     violations: list[str] = []
@@ -156,7 +156,9 @@ class AttemptInfo(BaseModel):
     output_tokens: int | None = None
 
     @classmethod
-    def from_attempt(cls, stage: Literal["parse", "highlights"], attempt: Attempt) -> Self:
+    def from_attempt(
+        cls, stage: Literal["parse", "highlights", "history"], attempt: Attempt
+    ) -> Self:
         return cls(
             stage=stage,
             passed=attempt.passed,
@@ -238,6 +240,37 @@ class SearchResponse(BaseModel):
     thread_id: UUID | None = None
 
 
+class IncidentHit(BaseModel):
+    doc_id: str
+    title: str
+    date: str  # ISO date
+    severity: str | None
+    url: str  # where the incident lives in its system of record
+    score: float  # hybrid: reciprocal rank fusion; keyword: ts_rank; only the order matters
+    match: str  # the section that matched best
+
+
+class HistorySentenceInfo(BaseModel):
+    text: str
+    cites: list[str]
+
+
+class HistoryResponse(BaseModel):
+    """Past incidents for the question. The list is written by code from search; the summary
+    is the LLM's, and every sentence passed the citation checks (ADR 0016)."""
+
+    kind: Literal["history"] = "history"
+    mode: Literal["hybrid", "keyword"]
+    incidents: list[IncidentHit]
+    # True or False when the LLM judged whether the incidents answer the question; None when
+    # no summary was written (no LLM, or its replies failed the checks).
+    answered: bool | None
+    summary: list[HistorySentenceInfo]
+    message: str
+    attempts: list[AttemptInfo] = []
+    thread_id: UUID | None = None
+
+
 AbstainReason = Literal["out_of_scope", "not_understood", "llm_off", "llm_unavailable"]
 
 
@@ -250,6 +283,11 @@ class AbstainResponse(BaseModel):
 
 
 AskResponse = Annotated[
-    LineageResponse | OwnerResponse | SearchResponse | ClarificationResponse | AbstainResponse,
+    LineageResponse
+    | OwnerResponse
+    | SearchResponse
+    | HistoryResponse
+    | ClarificationResponse
+    | AbstainResponse,
     Field(discriminator="kind"),
 ]

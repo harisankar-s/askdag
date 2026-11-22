@@ -5,10 +5,11 @@ START ─ begin ─┬─ read_fields ─────┬─ resolve ─┬─ li
                          ├─ lineage | owner    └─ clarify ─┬─ lineage | owner
                          │   (follow-up)                    └─ END
                          ├─ search
+                         ├─ history
                          └─ abstain
 
 The parse call's intent picks lineage or owner after a node is resolved; owner answers come
-from SQL alone.
+from SQL alone. history searches incidents with the question as asked (ADR 0015, 0016).
 
 Nodes are thin wrappers over the pure functions; the connection and provider come through the
 runtime context, not the state, so the state can be checkpointed. One builder compiles twice:
@@ -29,6 +30,7 @@ from langgraph.types import Command, interrupt
 from psycopg.rows import dict_row
 
 from asklineage.answer.facts import OWNER_SOURCE_MEANING
+from asklineage.answer.history import Retrieved, answer_history
 from asklineage.answer.lineage_answer import HighlightStatus, answer_lineage
 from asklineage.answer.parse import (
     Intent,
@@ -50,6 +52,9 @@ from asklineage.api.models import (
     EdgeInfo,
     FactsInfo,
     HighlightInfo,
+    HistoryResponse,
+    HistorySentenceInfo,
+    IncidentHit,
     LineageResponse,
     NodeInfo,
     NodeRow,
@@ -61,6 +66,7 @@ from asklineage.api.models import (
 from asklineage.config import Settings
 from asklineage.embed.base import EmbeddingProvider
 from asklineage.embed.factory import get_embedder
+from asklineage.incidents.search import find_incidents, incident_sections, known_spellings
 from asklineage.lineage.graph import DEFAULT_DEPTH, Direction, Lineage, LineageNode, lineage
 from asklineage.lineage.resolve import (
     Ambiguous,
@@ -74,14 +80,17 @@ from asklineage.lineage.resolve import (
 from asklineage.llm.base import LLMProvider
 from asklineage.search.query import search
 
+HISTORY_INCIDENTS = 3
+HISTORY_SECTIONS = ("Summary", "Root cause", "Fix")
+
 # The longest run is 5 steps; a run that needs more is a bug, not a slow question.
 RECURSION_LIMIT = 10
 
 ABSTAIN_MESSAGES: dict[str, str] = {
     "out_of_scope": (
         "asklineage answers questions about this dbt project's models: where a model's data "
-        "comes from, what reads from it downstream, and who owns it. Ask about a model or "
-        "source by name."
+        "comes from, what reads from it downstream, who owns it, and whether it has broken "
+        "before. Ask about a model or source by name."
     ),
     "not_understood": (
         "I couldn't tell which node and direction the question is about. Name the model or "
@@ -174,6 +183,9 @@ STATE_TYPES: tuple[type, ...] = (
     OwnerResponse,
     SearchResponse,
     SearchHit,
+    HistoryResponse,
+    IncidentHit,
+    HistorySentenceInfo,
     NodeInfo,
     CandidateInfo,
     NodeRow,
@@ -237,8 +249,8 @@ def parse(state: AskState, runtime: Runtime[AskContext]) -> AskState:
     if parsed is None:
         reason = "llm_unavailable" if generated.attempts[-1].error else "not_understood"
         return {"abstain_reason": reason, "attempts": attempts}
-    if parsed.intent == "search":
-        return {"intent": "search", "attempts": attempts}
+    if parsed.intent in ("search", "history"):
+        return {"intent": parsed.intent, "attempts": attempts}
     if parsed.intent == "other":
         return {"abstain_reason": "out_of_scope", "attempts": attempts}
 
@@ -258,11 +270,13 @@ def answer_route(state: AskState) -> Literal["lineage", "owner"]:
     return "owner" if state.get("intent") == "owner" else "lineage"
 
 
-def after_parse(state: AskState) -> Literal["abstain", "search", "lineage", "owner", "resolve"]:
+def after_parse(
+    state: AskState,
+) -> Literal["abstain", "search", "history", "lineage", "owner", "resolve"]:
     if state.get("abstain_reason"):
         return "abstain"
-    if state.get("intent") == "search":
-        return "search"
+    if state.get("intent") in ("search", "history"):
+        return state["intent"]
     return answer_route(state) if state.get("root") else "resolve"
 
 
@@ -443,6 +457,71 @@ def find(state: AskState, runtime: Runtime[AskContext]) -> AskState:
     return {"response": response}
 
 
+def recall(state: AskState, runtime: Runtime[AskContext]) -> AskState:
+    context, request = runtime.context, state["request"]
+    embedder = context.search.embedder
+    mode = "hybrid" if embedder else "keyword"
+    hits = find_incidents(
+        context.conn, request.question, mode, embedder, project=request.project, k=HISTORY_INCIDENTS
+    )
+    found = incident_sections(context.conn, hits, HISTORY_SECTIONS)
+    with context.conn.cursor(row_factory=dict_row) as cur:
+        rows = cur.execute(
+            "SELECT project_name, doc_id, doc_date, severity, url FROM documents "
+            "WHERE (project_name, doc_id) IN (SELECT * FROM unnest(%s::text[], %s::text[]))",
+            ([h.project for h in hits], [h.doc_id for h in hits]),
+        ).fetchall()
+    meta = {(r["project_name"], r["doc_id"]): r for r in rows}
+    retrieved = [
+        Retrieved(
+            hit.doc_id,
+            hit.title,
+            tuple(
+                (section, content.split("\n", 1)[-1].removeprefix(f"{section}: "))
+                for section, content in found[(hit.project, hit.doc_id)]
+            ),
+            meta[(hit.project, hit.doc_id)]["doc_date"].isoformat(),
+        )
+        for hit in hits
+    ]
+    known = known_spellings(context.conn, request.project) if context.provider else {}
+    result = answer_history(request.question, retrieved, context.provider, known)
+    incidents = [
+        IncidentHit(
+            doc_id=hit.doc_id,
+            title=hit.title,
+            date=meta[(hit.project, hit.doc_id)]["doc_date"].isoformat(),
+            severity=meta[(hit.project, hit.doc_id)]["severity"],
+            url=meta[(hit.project, hit.doc_id)]["url"],
+            score=round(hit.score, 4),
+            match=hit.section or "",
+        )
+        for hit in hits
+    ]
+    summary = result.summary
+    if not incidents:
+        message = "No recorded incident matches the question."
+    elif summary is None:
+        why = "LLM_PROVIDER is none" if context.provider is None else "no reply passed the checks"
+        message = f"The closest {len(incidents)} incidents, unsummarised ({why}); check they match."
+    elif not summary.answered:
+        message = "No recorded incident answers the question; these are only the closest matches."
+    else:
+        message = f"Summarised from {len(incidents)} incidents; each sentence cites its sources."
+    response = HistoryResponse(
+        mode=mode,
+        incidents=incidents,
+        answered=summary.answered if summary else None,
+        summary=[
+            HistorySentenceInfo(text=s.text, cites=list(s.cites))
+            for s in (summary.sentences if summary and summary.answered else [])
+        ],
+        message=message,
+    )
+    attempts = [AttemptInfo.from_attempt("history", a) for a in result.attempts]
+    return {"response": response, "attempts": attempts}
+
+
 def build_graph(checkpointer: BaseCheckpointSaver | None = None) -> CompiledStateGraph:
     graph = StateGraph(AskState, context_schema=AskContext)
     graph.add_node("begin", begin)
@@ -455,17 +534,18 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None) -> CompiledStat
     graph.add_node("answer", answer)
     graph.add_node("owner", owner)
     graph.add_node("search", find)
+    graph.add_node("history", recall)
 
     graph.add_edge(START, "begin")
     graph.add_conditional_edges("begin", route_input, ["read_fields", "parse"])
     graph.add_edge("read_fields", "resolve")
     graph.add_conditional_edges(
-        "parse", after_parse, ["abstain", "search", "lineage", "owner", "resolve"]
+        "parse", after_parse, ["abstain", "search", "history", "lineage", "owner", "resolve"]
     )
     graph.add_conditional_edges("resolve", after_resolve, ["lineage", "owner", "clarify"])
     graph.add_conditional_edges("clarify", after_clarify, ["lineage", "owner", END])
     graph.add_edge("lineage", "answer")
-    for last in ("abstain", "answer", "owner", "search"):
+    for last in ("abstain", "answer", "owner", "search", "history"):
         graph.add_edge(last, END)
     return graph.compile(checkpointer=checkpointer)
 

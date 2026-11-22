@@ -62,11 +62,12 @@ def project_chunks(conn: psycopg.Connection, project: str) -> list[Chunk]:
     return chunks
 
 
-def column_dimensions(conn: psycopg.Connection) -> int:
+def column_dimensions(conn: psycopg.Connection, table: str = "node_chunks") -> int:
     with conn.cursor(row_factory=tuple_row) as cur:
         (dims,) = cur.execute(
             "SELECT atttypmod FROM pg_attribute "
-            "WHERE attrelid = 'node_chunks'::regclass AND attname = 'embedding'"
+            "WHERE attrelid = %s::regclass AND attname = 'embedding'",
+            (table,),
         ).fetchone()
     return dims
 

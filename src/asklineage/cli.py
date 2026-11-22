@@ -19,6 +19,9 @@ from asklineage.answer.lineage_answer import HighlightStatus, LineageAnswer, ans
 from asklineage.api.flow import checkpoint_serde, search_options
 from asklineage.api.threads import prune_threads
 from asklineage.config import get_settings
+from asklineage.corpus.docs import CorpusError, check_corpus, load_corpus
+from asklineage.corpus.docs import describe as describe_corpus
+from asklineage.corpus.scaffold import scaffold, write_scaffold
 from asklineage.embed.base import EmbeddingError, cosine, index_name
 from asklineage.embed.chunks import CHUNK_KINDS
 from asklineage.embed.factory import get_embedder
@@ -31,6 +34,13 @@ from asklineage.eval.conformance import (
     run_conformance,
 )
 from asklineage.eval.golden import PHRASINGS, GoldenSetError, NameIndex, build_golden, describe
+from asklineage.eval.incident_eval import (
+    IncidentSetError,
+    check_against_corpus,
+    load_incident_set,
+    run_incident_eval,
+)
+from asklineage.eval.incident_eval import render as render_incidents
 from asklineage.eval.report import render, summarize
 from asklineage.eval.run import EvalContext, run_golden, run_info, write_run
 from asklineage.eval.search_eval import KIND_SETS, Config, families, run_search_eval
@@ -42,6 +52,8 @@ from asklineage.eval.search_set import (
     load_search_set,
 )
 from asklineage.eval.truth import truth_graph
+from asklineage.incidents.search import METHODS, NoVectorsError
+from asklineage.incidents.store import index_incidents
 from asklineage.ingest.load import apply_schema, load_manifest
 from asklineage.ingest.manifest import UnsupportedManifestError, parse_manifest
 from asklineage.ingest.owners import load_owner_rules
@@ -132,6 +144,34 @@ def main(argv: list[str] | None = None) -> None:
         "--questions", type=Path, default=Path("config/search_questions.calitp.yml")
     )
     search_eval.add_argument("--out", type=Path, default=Path("data/eval/search"))
+    incidents_eval = evals.add_parser("incidents", help="Score incident search methods")
+    incidents_eval.add_argument(
+        "--questions", type=Path, default=Path("config/incident_questions.calitp.yml")
+    )
+    incidents_eval.add_argument("--dir", type=Path, default=Path("corpus/calitp"))
+    incidents_eval.add_argument("--out", type=Path, default=Path("data/eval/incidents"))
+    docs = commands.add_parser("load-docs", help="Index a corpus's incidents for search")
+    docs.add_argument("--dir", type=Path, default=Path("corpus/calitp"))
+    corpus = commands.add_parser("corpus", help="Scaffold and check the synthetic incident corpus")
+    corpus_commands = corpus.add_subparsers(dest="corpus_command", required=True)
+    corpus_scaffold = corpus_commands.add_parser(
+        "scaffold", help="Write seeded document skeletons (facts only) from a manifest"
+    )
+    corpus_scaffold.add_argument("manifest", type=Path)
+    corpus_scaffold.add_argument("--dir", type=Path, default=Path("corpus/calitp"))
+    corpus_scaffold.add_argument("--project", default="calitp_warehouse")
+    corpus_scaffold.add_argument("--seed", type=int, default=14)
+    corpus_scaffold.add_argument(
+        "--symptom-paths", nargs="+", default=["models/mart/*"], help="where breakage is noticed"
+    )
+    corpus_check = corpus_commands.add_parser(
+        "check", help="Check every corpus document against a manifest and its lineage"
+    )
+    corpus_check.add_argument("manifest", type=Path)
+    corpus_check.add_argument("--dir", type=Path, default=Path("corpus/calitp"))
+    corpus_check.add_argument(
+        "--drafts-ok", action="store_true", help="don't fail on documents still marked TODO"
+    )
     args = parser.parse_args(argv)
     if args.command == "lineage" and not 1 <= args.depth <= MAX_DEPTH:
         parser.error(f"--depth must be between 1 and {MAX_DEPTH}")
@@ -150,6 +190,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "eval" and args.eval_command == "search-set":
         _eval_search_set(args)
         return
+    if args.command == "corpus":
+        _corpus(args)
+        return
 
     url = get_settings().database_url
     with (
@@ -167,6 +210,8 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Pruned {pruned} thread(s) unused for {args.older_than_hours:g} hours or more.")
         elif args.command == "lineage":
             _show_lineage(conn, args)
+        elif args.command == "load-docs":
+            _load_docs(conn, args)
         elif args.command == "search":
             _print_search(
                 search(
@@ -186,6 +231,8 @@ def main(argv: list[str] | None = None) -> None:
             _eval_run(conn, args)
         elif args.command == "eval" and args.eval_command == "search":
             _eval_search(conn, args)
+        elif args.command == "eval" and args.eval_command == "incidents":
+            _eval_incidents(conn, args)
         elif args.command == "eval":
             _eval_conformance(conn, args)
         else:
@@ -300,6 +347,48 @@ def _print_search(result: SearchResult) -> None:
         print(f"  {hit.score:6.3f}  {hit.kind:<7}  {hit.display_name:<{width}}  {owner}{via}")
 
 
+def _eval_incidents(conn: psycopg.Connection, args: argparse.Namespace) -> None:
+    embedder = get_embedder(get_settings())
+    try:
+        incident_set = load_incident_set(args.questions)
+        corpus, problems = load_corpus(args.dir)
+        if problems:
+            raise CorpusError("\n".join(problems))
+        check_against_corpus(incident_set, corpus)
+    except (IncidentSetError, CorpusError) as exc:
+        print(exc)
+        raise SystemExit(1) from exc
+    methods = METHODS if embedder else ("names", "keyword")
+    tag = index_name(embedder) if embedder else "keyword-only"
+    header = (
+        f"Incident eval: set {incident_set.sha}, {len(incident_set.questions)} questions, "
+        f"vectors {tag!r}"
+    )
+    print(header)
+    try:
+        results = run_incident_eval(
+            conn,
+            incident_set,
+            embedder,
+            methods,
+            on_method=lambda method: print(f"  running {method}"),
+        )
+    except (NoVectorsError, EmbeddingError) as exc:
+        print(f"Incident eval failed: {exc}")
+        raise SystemExit(1) from exc
+    report = render_incidents(results, header)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    run_dir = args.out / f"{stamp}-{''.join(c if c.isalnum() else '-' for c in tag)}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    info = {"incident_set": incident_set.sha, "questions_file": str(args.questions), "vectors": tag}
+    (run_dir / "results.json").write_text(
+        json.dumps({"info": info, "results": results}, indent=2, sort_keys=True)
+    )
+    (run_dir / "report.txt").write_text(report)
+    print(report)
+    print(f"Wrote {run_dir}")
+
+
 def _eval_search(conn: psycopg.Connection, args: argparse.Namespace) -> None:
     raw = args.manifest.read_bytes()
     manifest = json.loads(raw)
@@ -377,6 +466,57 @@ def _eval_search_set(args: argparse.Namespace) -> None:
         overlap = description_overlap(question, manifest, search_set.project)
         shown = "    -" if overlap is None else f"{overlap:5.2f}"
         print(f"  {shown}  {question.id:<4} {question.category:<12} {question.question}")
+
+
+def _load_docs(conn: psycopg.Connection, args: argparse.Namespace) -> None:
+    try:
+        corpus, problems = load_corpus(args.dir)
+    except CorpusError as exc:
+        print(exc)
+        raise SystemExit(1) from exc
+    if problems:
+        print("\n".join(f"  - {p}" for p in problems))
+        raise SystemExit(1)
+    try:
+        report = index_incidents(conn, corpus, get_embedder(get_settings()))
+    except (LookupError, EmbeddingError) as exc:
+        print(f"Nothing indexed: {exc}")
+        raise SystemExit(1) from exc
+    vectors = report.model or "none (EMBED_PROVIDER=none; keyword search only)"
+    print(f"Indexed {report.documents} incidents of {report.project} in {report.seconds:.1f} s")
+    print(f"  chunks   {report.chunks}")
+    print(f"  vectors  {vectors}")
+    print(f"  linked   {report.linked} incidents name a node ({report.links} links)")
+
+
+def _corpus(args: argparse.Namespace) -> None:
+    manifest = json.loads(args.manifest.read_text())
+    if args.corpus_command == "scaffold":
+        skeletons = scaffold(manifest, args.project, args.seed, symptom_paths=args.symptom_paths)
+        try:
+            written = write_scaffold(args.dir, args.project, args.seed, skeletons)
+        except FileExistsError as exc:
+            print(f"Nothing written: {exc}")
+            raise SystemExit(1) from exc
+        kinds = Counter(skeleton.folder for skeleton in skeletons)
+        print(f"Wrote {written} skeletons to {args.dir} (seed {args.seed}): {dict(kinds)}")
+        return
+    try:
+        report = check_corpus(args.dir, manifest)
+    except CorpusError as exc:
+        print(exc)
+        raise SystemExit(1) from exc
+    stats = describe_corpus(report)
+    print(f"Corpus {args.dir}: {len(report.corpus.documents)} documents {stats['types']}")
+    print(f"  informal {stats['informal']}  decoys {stats['decoys']}  causes {stats['causes']}")
+    print(f"  busiest  {stats['busiest']}")
+    print(f"  drafts   {len(report.drafts)}")
+    for problem in report.problems:
+        print(f"  - {problem}")
+    if report.problems or (report.drafts and not args.drafts_ok):
+        print(f"{len(report.problems)} problem(s), {len(report.drafts)} draft(s)")
+        raise SystemExit(1)
+    print("Every document agrees with the manifest.")
 
 
 def _load_manifest(

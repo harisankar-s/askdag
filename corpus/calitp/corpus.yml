@@ -1,0 +1,4 @@
+# Synthetic corpus for calitp_warehouse (ADR 0014). Fixed once the prose is written.
+version: 1
+project: calitp_warehouse
+seed: 14

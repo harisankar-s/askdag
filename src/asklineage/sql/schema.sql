@@ -93,3 +93,43 @@ CREATE TABLE IF NOT EXISTS node_chunks (
 );
 
 CREATE INDEX IF NOT EXISTS node_chunks_project_idx ON node_chunks (project_name);
+
+-- A search index of incident write-ups, not their system of record (ADR 0015). In production
+-- the record is a ticketing tool; here the Markdown corpus stands in for its export (ADR 0014).
+-- node_ids are names detected in the text, never the front-matter: that is the eval's ground
+-- truth, and reading it here would grade the system against its own input. No foreign key to
+-- nodes, for the same reason as node_chunks. `load-docs` replaces a project's rows at once.
+CREATE TABLE IF NOT EXISTS documents (
+    project_name text NOT NULL,
+    doc_id text NOT NULL,
+    source text NOT NULL,
+    url text NOT NULL,
+    doc_type text NOT NULL,
+    title text NOT NULL,
+    doc_date date NOT NULL,
+    severity text,
+    node_ids text[] NOT NULL DEFAULT '{}',
+    body text NOT NULL,
+    loaded_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (project_name, doc_id)
+);
+
+CREATE INDEX IF NOT EXISTS documents_node_ids_idx ON documents USING gin (node_ids);
+
+-- One chunk per section. Vectors are optional so EMBED_PROVIDER=none still gets keyword search;
+-- the dimension must match node_chunks and EMBED_DIMENSIONS.
+CREATE TABLE IF NOT EXISTS doc_chunks (
+    project_name text NOT NULL,
+    doc_id text NOT NULL,
+    ordinal integer NOT NULL CHECK (ordinal >= 0),
+    section text NOT NULL,
+    content text NOT NULL,
+    search tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
+    model text,
+    embedding vector(768),
+    PRIMARY KEY (project_name, doc_id, ordinal),
+    FOREIGN KEY (project_name, doc_id) REFERENCES documents ON DELETE CASCADE,
+    CHECK ((model IS NULL) = (embedding IS NULL))
+);
+
+CREATE INDEX IF NOT EXISTS doc_chunks_search_idx ON doc_chunks USING gin (search);

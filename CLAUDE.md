@@ -4,6 +4,12 @@ An open-source assistant that answers data-team questions about a dbt project: w
 
 The author is a data engineering architect building this to learn enterprise RAG, publish a reusable public repo, and prepare for architect interviews. Every design choice should be explainable as a trade-off.
 
+## Scope
+
+- A reference build, not a service: no real users, no production operations (no on-call, SLAs, multi-tenancy, cloud deployment). Code and design choices are still production grade: typed, tested, bounded, honest failure modes.
+- The deliverable is a repo anyone can clone and run on a laptop, plus an article explaining the trade-offs.
+- An eval earns its place only if it decides something or guards a promise (lineage is exact; answers cite what they used). Each ADR names the number that decided it. If no decision depends on a measurement, don't build the harness; argue the trade-off in the ADR instead.
+
 ## How to work with the author
 
 - **Write the code; don't run commands.** Give numbered steps with each command in its own `bash` block, what it does, and the expected output. The author runs everything in the VS Code terminal and pastes results back. Reading files to check things is fine.
@@ -17,7 +23,7 @@ The author is a data engineering architect building this to learn enterprise RAG
 ## Stack and conventions
 
 - Python 3.12, uv (`uv add`, `uv sync`, `uv run`), FastAPI, psycopg 3 with a connection pool, Postgres 17 + pgvector in `docker-compose.yml`. LangGraph orchestrates `/api/ask` (graph runtime only, no LangChain models; ADR 0008).
-- Layout: `src/asklineage/` (package; `eval/` holds the eval harness, `web/` the static UI page), `tests/`, `scripts/`, `config/`, `docs/decisions/`, `tools/dbt/`.
+- Layout: `src/asklineage/` (package; `eval/` holds the eval harness, `web/` the static UI page, `corpus/` the synthetic document format and scaffold), `tests/`, `scripts/`, `config/`, `corpus/calitp/` (synthetic incidents, runbooks, Slack threads; committed), `docs/decisions/`, `tools/dbt/`.
 - Ruff for lint and format (line length 100); CI runs `ruff check`, `ruff format --check` and `pytest` (`.github/workflows/ci.yml`).
 - Keep parsing pure (no database) so it's unit-testable with `tests/fixtures/mini_manifest.json`; database writes live in `ingest/load.py`.
 - `src/asklineage/sql/schema.sql` is idempotent (`IF NOT EXISTS`) and applied by `asklineage init-db`. Changing an existing column needs a manual migration; say so when it comes up.
@@ -43,12 +49,16 @@ open http://localhost:8000/
 curl -s localhost:8000/api/info
 curl -s localhost:8000/api/ask -H 'content-type: application/json' -d '{"node": "dim_schedule_feeds"}'
 curl -s localhost:8000/api/ask -H 'content-type: application/json' -d '{"question": "What depends on dim_schedule_feeds?", "start_thread": true}'
+curl -s localhost:8000/api/ask -H 'content-type: application/json' -d '{"question": "Has dim_stops broken before, and how was it fixed?"}'
 uv run asklineage prune-threads --older-than-hours 24
 uv run asklineage eval conformance data/manifests/calitp/manifest.json
 uv run asklineage eval golden data/manifests/calitp/manifest.json
 uv run asklineage eval search-set data/manifests/calitp/manifest.json
 uv run asklineage eval search data/manifests/calitp/manifest.json
 uv run asklineage eval run data/manifests/calitp/manifest.json --source-repo data/raw/data-infra
+uv run asklineage corpus check data/manifests/calitp/manifest.json
+uv run asklineage load-docs
+uv run asklineage eval incidents
 ```
 
 Stop `uvicorn --reload` before `uv add` or `uv sync`: the reloader watches `.venv`, restarts mid-install, and can leave port 8000 held by a dead worker, so requests hang instead of failing.
@@ -78,16 +88,16 @@ Key design rules:
 | 0 | Starter kit: FastAPI, Postgres + pgvector, CI | Done |
 | 1 | Lineage MVP | Done |
 | 2 | pgvector semantic search + question classifier | Done |
-| 3 | Synthetic incidents, runbooks, Slack threads; hybrid retrieval | Planned |
-| 4 | Refresh on dbt deploy; second project (Snowflake); manifest diffing | Planned |
-| 5 | Experiments: pgvector vs. Pinecone, LLM providers, column-level lineage | Planned |
-| 6 | Hardening: auth, OpenTelemetry, deployment, eval in CI; eval v2 (bigger golden set, hand labels, highlights chosen in code) | Planned |
+| 3 | Incident retrieval: synthetic corpus, hybrid search, cited "has it broken before?" answers | Done |
+| 4 | Change awareness: manifest diff and incremental refresh; a tiny second project as the reader quickstart | Planned |
+| 5 | Measured experiments on existing evals: HNSW vs exact scan, a second LLM, highlights chosen in code | Planned |
+| 6 | Release: one-command Docker stack, API key and tracing, cheap evals in CI, README, demo, article | Planned |
 
 Phase 1 is built (steps 1 to 8); the history and numbers live in ADRs 0001–0011 and the README, so they aren't repeated here. What to know when coding:
-- Modules: `ingest/` (manifest parser, loader, owner rules), `lineage/` (name resolution, bounded walk), `llm/` (provider interface, OpenAI-compatible adapter, `ScriptedProvider` for tests), `embed/` (embedding interface, OpenAI-compatible adapter, `HashingEmbedder` for tests; ADR 0012), `answer/` (facts, grounding, `generate_checked`, parse checks), `api/` (flow, ask, threads, models, info), `eval/` (truth, conformance, golden set, score, run, highlights), `web/index.html` (static page, no `innerHTML`, no JS tests; checked by hand).
+- Modules: `ingest/` (manifest parser, loader, owner rules), `lineage/` (name resolution, bounded walk), `llm/` (provider interface, OpenAI-compatible adapter, `ScriptedProvider` for tests), `embed/` (embedding interface, OpenAI-compatible adapter, `HashingEmbedder` for tests; ADR 0012), `corpus/` (synthetic document format, checks, scaffold; ADR 0014), `incidents/` (incident chunks, name detection, index; ADR 0015), `answer/` (facts, grounding, `generate_checked`, parse checks), `api/` (flow, ask, threads, models, info), `eval/` (truth, conformance, golden set, score, run, highlights), `web/index.html` (static page, no `innerHTML`, no JS tests; checked by hand).
 - openai 3.x runs on `httpx2`, so adapter tests mock with `httpx2.MockTransport`.
 - `/api/ask` threads use `PostgresSaver`; every type stored in flow state must be in `STATE_TYPES` (`api/flow.py`). `LineageResponse.edges` is required and the eval checks it against the manifest.
-- Eval baseline on Cal-ITP: conformance 8,650 walks, 0 mismatches; qwen2.5:7b final run 55 correct, 1 acceptable, 0 wrong of 56. Highlights are true but chosen worse than random; choosing them in code is deferred to Phase 6 (eval v2).
+- Eval baseline on Cal-ITP: conformance 8,650 walks, 0 mismatches; qwen2.5:7b final run 55 correct, 1 acceptable, 0 wrong of 56. Highlights are true but chosen worse than random; choosing them in code is a Phase 5 experiment.
 - Open items: replace the clone URL placeholder in `README.md` and add `docs/images/web-ui.png`.
 
 Phase 2 steps:
@@ -100,9 +110,26 @@ Phase 2 steps:
   - 2d.3 web UI for owner and search kinds (`renderOwner`, `renderSearch`, ADR 0011 addendum) — done, checked by hand
 - 2e search eval: recall@k on the hand-written questions, both search paths — built (`eval/search_eval.py`, `asklineage eval search`: 6 configs, hit@k/MRR/recall@10 by category, cutoff table, writes `data/eval/search/`); vectors now tagged with model + document prefix (`index_name`), so a prefix change re-embeds. Cal-ITP (ADR 0012 table): semantic all kinds hit@5 19/30, MRR 0.525 vs keyword 9/30, 0.161; prefixes kept (better cutoff); cutoff 0.667 catches 3/5 unanswerable, blocks 1/30, so it is a flag, not an abstain. Then: snake_case split in column/sql chunks (kept, noise-level); family metric fam@1 18 vs hit@1 12; lineage-aware ranking (`SEARCH_PREFERRED_PATHS`, lift ≤3 marts within 2 hops, 0.98 for non-preferred, `via`) on by default; Cal-ITP all kinds: hit@1 16/30, hit@5 22/30, MRR 0.614 (from 12, 20, 0.519); cutoff unchanged
 
+Phase 3 steps:
+- 3a corpus (ADR 0014): `corpus/docs.py` (Markdown + YAML front-matter; front-matter is ground truth; `check_corpus` holds facts to the manifest and lineage, mention exact/informal enforced), `corpus/scaffold.py` (seeded skeletons, Zipf-skewed symptoms, decoys, refuses to overwrite), `asklineage corpus scaffold|check` — done; Cal-ITP seed 14: 40 incidents (11 informal, 6 decoys, no incremental_gap drawn), 12 runbooks, 25 threads (15 about incidents), prose hand-written; `dim_schedule_feeds` has 9 incidents
+Phase 3 is kept minimal: only incidents are indexed. Runbooks and Slack threads stay in the corpus, unloaded. They are the obvious next step; ADR 0015 explains why they aren't built.
+- 3b (ADR 0015) `incidents/chunks.py` (one chunk per section with an id/date/severity/title header; `detect_nodes` finds exact names in the text: front-matter is never read by the app), `incidents/store.py` (`index_incidents`: embed first, then replace the project's `documents` + `doc_chunks` in one transaction; vectors optional, `tsvector` generated), `asklineage load-docs` — done; Cal-ITP: 40 incidents, 200 chunks in 3 s; name detection links all 29 exact incidents fully and none of the 11 informal ones (63 links). Index, not record: `source` + `url` point back at the system of record
+- 3c (ADR 0015) `config/incident_questions.calitp.yml` (17 questions: named 4, symptom 5, loose 3, decoy 3, none 2), `incidents/search.py` (`find_incidents`: names = detected names + 4 hops upstream; keyword = OR'd full-text; vector; hybrid = RRF k=60 over the top 30 of each; routed = names first, then hybrid), `eval/incident_eval.py`, `asklineage eval incidents` — done; Cal-ITP hit@1/MRR: names 3/0.233, keyword 14/0.956, vector 11/0.844, hybrid 13/0.922, routed 12/0.889; all but names saturate at hit@3 15/15; nothing abstains on the 2 unanswerable questions. Keyword's lead comes from one author writing both prose and questions. Decision: 3d uses hybrid (ADR 0015 addendum)
+- 3d (ADR 0016) `history` intent in the parse call (no node required; question goes to hybrid search as asked); `answer/history.py` (code lists top 3 incidents from SQL; LLM writes ≤4 sentences or `answered: false`; each sentence must cite given ids, mention only cited ids, name only nodes its cited incidents name, use only numbers from its cited incidents or their dates; one retry; else list only); flow node `history`, `HistoryResponse`, `renderHistory`; golden v4 adds 3 history turns (intent only) — first run: right incidents, right abstention, but the model invented years ("7 May 2023" for a 2025 incident); number check added; rerun right years and passes first try; web card checked by hand — done
+
+Phases 4–6 (slim; cut items are argued in ADRs, not built):
+- 4 `asklineage diff old.json new.json` (added, removed, changed nodes and edges, and what is downstream of the changes); `load-manifest` + `embed` already re-embed only changed chunks, so refresh is a documented sequence, not a service. A tiny public dbt project (jaffle-shop style) committed as the 5-minute quickstart and the portability check. Cut: deploy webhooks, a Snowflake project
+- 5 three experiments, each one table in an ADR, each on an eval that already exists: pgvector HNSW vs exact scan (recall@k and latency on the search and incident sets); a hosted model vs qwen2.5:7b on the golden set; highlights chosen in code vs by the LLM (existing highlight eval). Cut: Pinecone (argued, not run), column-level lineage (named as a limitation; needs compiled SQL, which `dbt parse` doesn't give)
+- 6 `docker compose up` runs app + Postgres (+ optional Ollama) from a clean clone; an API-key dependency on `/api/*` to show the pattern; OpenTelemetry spans per flow node and LLM/embedding call (console or Jaeger in compose); CI runs conformance and the retrieval evals with `HashingEmbedder` (no LLM); README quickstart, demo video, launch post and article from the ADRs. Cut: real auth, cloud deployment, bigger golden set, hand labels, LLM-as-judge
+
 ## Evaluation approach
 
-Evaluate each layer separately: classifier accuracy, name resolution, lineage set precision/recall (must be 100%; a miss is a bug), recall@k for semantic and incident search, answer correctness, correct abstention on unanswerable questions, and hallucination rate per 100 lineage answers. Lineage ground truth is generated from the manifest. LLM-as-judge uses a different model family from the generator and is checked against hand labels.
+Each layer has one eval, and each eval guards a promise or decides a choice:
+- Lineage: exhaustive conformance against an independent BFS; must be 100% (a miss is a bug).
+- Parse/intent and name resolution: the golden set (regression; small additions only).
+- Search and incident retrieval: hand-written questions, hit@k and MRR, compared across configs; the cutoff table says whether abstaining is possible.
+- Answers: grounding is enforced in code at runtime (checked highlights, cited sentences), so it needs no judge model. The golden run counts correct, acceptable and wrong.
+No LLM-as-judge and no hand-labelled answer set in this build; the ADRs say why.
 
 ## Decision records
 
@@ -119,3 +146,6 @@ Evaluate each layer separately: classifier accuracy, name resolution, lineage se
 - `0011` Web UI: one static HTML page served by FastAPI, using only `/api/ask` and `/api/info`, with a hand-written SVG graph; not Streamlit/Gradio or React
 - `0012` Separate embedding provider interface; task prefixes and dimension as settings; nomic-embed-text default
 - `0013` Intent in the parse call (lineage, owner, search, other); owner answers from SQL
+- `0014` Synthetic incident corpus: seeded scaffold, hand-written prose, ground truth in front-matter, checked against lineage
+- `0015` Incidents: a search index copied from the system of record (not queried live); node links from names detected in the text; incidents only; hybrid search chosen (3c)
+- `0016` History answers: code lists incidents, the LLM summarises with citations and node names checked in code; `answered: false` for abstention

@@ -19,8 +19,9 @@ MAX_QUESTION_CHARS = 500
 BACKTICKED = re.compile(r"`([^`]+)`")
 NAME_LIKE = re.compile(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*")
 
-# lineage and owner name a node; search describes data without naming one; other is the rest.
-type Intent = Literal["lineage", "owner", "search", "other"]
+# lineage and owner name a node; search describes data without naming one; history asks about
+# past incidents, named node or not (incident search reads the question itself); other is the rest.
+type Intent = Literal["lineage", "owner", "search", "history", "other"]
 NAMES_A_NODE = ("lineage", "owner")
 
 
@@ -56,16 +57,18 @@ or breaks if it changes (downstream).
 - "owner": who owns a node or which team is responsible for it.
 - "search": which model or table holds some data, described in words without naming a node, \
 like "which table has bus stop locations?".
+- "history": whether something has broken, failed or gone wrong before, past incidents or \
+outages, or how a problem was fixed last time, with or without a node name.
 - "other": anything else, such as what a column means, how to write SQL, or general chat.
 
 Reply with JSON:
-- intent: one of the four above.
+- intent: one of the five above.
 - same_node: true only when there is a previous question and this one is a lineage or owner \
 follow-up about the same node without naming a node, like "and upstream?" or "who owns it?". \
 Otherwise false.
 - entity: for lineage and owner, the model, source or seed name copied exactly as written in \
 the question, without quotes or backticks. Never correct, complete or guess a name. null when \
-same_node is true, and for search and other.
+same_node is true, and for search, history and other.
 - direction: for lineage only, "upstream" or "downstream"; null if the question doesn't say \
 and there is a previous question to keep it from. null for every other intent.
 - depth: for lineage only, the number of hops or levels if the question gives one, from 1 to \
@@ -100,6 +103,8 @@ EXAMPLES: tuple[tuple[str, PreviousQuestion | None, ParsedQuestion], ...] = (
     ),
     ("Who owns fct_orders?", None, _parsed("fct_orders", intent="owner")),
     ("Which table has customer email addresses?", None, _parsed(intent="search")),
+    ("Has fct_orders broken before?", None, _parsed(intent="history")),
+    ("What fixed the missing orders last time?", None, _parsed(intent="history")),
     ("How do I write a window function?", None, _parsed(intent="other")),
     ("And upstream?", PREVIOUS, _parsed(direction=Direction.UPSTREAM, same_node=True)),
     ("Who owns it?", PREVIOUS, _parsed(intent="owner", same_node=True)),

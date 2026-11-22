@@ -48,13 +48,13 @@ def chunk_node(node: Node, columns: Sequence[Column], limit: int = CHUNK_CHARS) 
     description = " ".join(node.description.split())
     pieces: dict[ChunkKind, list[str]] = {
         # An empty description still gives a summary chunk: the name alone can match.
-        "summary": _pack(description.split(), room, " ") or [""],
-        "columns": _pack(
+        "summary": pack(description.split(), room, " ") or [""],
+        "columns": pack(
             (" ".join(f"{_words(c.name)}: {c.description}".split()).rstrip(":") for c in columns),
             room,
             "\n",
         ),
-        "sql": _pack(_words(node.raw_code or "").split(), room, " "),
+        "sql": pack(_words(node.raw_code or "").split(), room, " "),
     }
     return [
         Chunk(node.unique_id, kind, ordinal, f"{head}\n{piece}".rstrip())
@@ -67,7 +67,7 @@ def _words(text: str) -> str:
     return SNAKE.sub(" ", text)
 
 
-def _pack(items: Iterable[str], room: int, sep: str) -> list[str]:
+def pack(items: Iterable[str], room: int, sep: str) -> list[str]:
     """Join items into pieces of at most room characters; an oversized item is cut."""
     pieces: list[str] = []
     current = ""

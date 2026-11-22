@@ -1,0 +1,80 @@
+# Hand-written incident questions for the Cal-ITP corpus (Phase 3, ADR 0015).
+# expected: incident ids; any of them in the top k counts as a hit. Empty means no incident
+# answers it. Expected ids come from the corpus front-matter, which the app never reads.
+# category says what makes the question hard:
+#   named    names a node; some matching incidents are informal and don't name it back
+#   symptom  describes what happened, names no node
+#   loose    Slack-style wording, names no node
+#   decoy    the right incident shares its symptom with others; only the cause tells them apart
+#   none     no incident answers it
+version: 1
+project: calitp_warehouse
+questions:
+  - id: n01
+    category: named
+    question: Has dim_stops had problems before, and how were they fixed?
+    expected: [inc-008, inc-023, inc-039]
+  - id: n02
+    category: named
+    question: What incidents have we had on fct_payments_aggregations?
+    expected: [inc-009, inc-014, inc-037]
+  - id: n03
+    category: named
+    question: Did tides_provider_gtfs_data ever break?
+    expected: [inc-018, inc-040]
+  - id: n04
+    category: named
+    question: Any history of issues with dim_organizations?
+    expected: [inc-036]
+  - id: s01
+    category: symptom
+    question: Why did timezone conversion go wrong for some schedule feeds?
+    expected: [inc-004]
+  - id: s02
+    category: symptom
+    question: What happened when the card processor changed how dates are written in their file?
+    expected: [inc-009]
+  - id: s03
+    category: symptom
+    question: Has one malformed file ever crashed a parse job and dropped feeds for the day?
+    expected: [inc-003, inc-033]
+  - id: s04
+    category: symptom
+    question: Has a backfill ever created duplicate feed versions?
+    expected: [inc-038]
+  - id: s05
+    category: symptom
+    question: What caused the public on-time numbers to go out with doubled trip counts?
+    expected: [inc-020]
+  - id: l01
+    category: loose
+    question: settlements looked way short at month end, has that happened before?
+    expected: [inc-007, inc-014]
+  - id: l02
+    category: loose
+    question: the stop map has holes again, what fixed it last time
+    expected: [inc-008, inc-023, inc-039]
+  - id: l03
+    category: loose
+    question: a few orgs didn't get their monthly report, anyone seen this?
+    expected: [inc-027]
+  - id: d01
+    category: decoy
+    question: Feeds went missing from the schedule feeds table even though every file parsed fine. What was it?
+    expected: [inc-012]
+  - id: d02
+    category: decoy
+    question: Real-time messages lost their schedule while the unzip records looked fine. What caused it?
+    expected: [inc-029]
+  - id: d03
+    category: decoy
+    question: When did stops disappear because some had no stop code?
+    expected: [inc-039]
+  - id: x01
+    category: none
+    question: Has the cloud billing export ever arrived late?
+    expected: []
+  - id: x02
+    category: none
+    question: Did upgrading dbt ever break the warehouse build?
+    expected: []

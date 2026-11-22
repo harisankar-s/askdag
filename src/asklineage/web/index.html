@@ -356,6 +356,26 @@ function renderSearch(r) {
   return parts;
 }
 
+function renderHistory(r) {
+  const parts = [
+    el("p", { class: "asked" }, "Past incidents", el("span", { class: "tag" }, r.mode)),
+    el("p", {}, r.message),
+  ];
+  if (r.answered === false) {
+    parts.push(el("div", { class: "note" }, "None of these incidents is about what was asked."));
+  }
+  if (r.summary.length) {
+    parts.push(el("ul", { class: "summary" }, ...r.summary.map((s) =>
+      el("li", {}, s.text + " ", el("span", { class: "muted" }, "[" + s.cites.join(", ") + "]")))));
+  }
+  if (!r.incidents.length) return parts;
+  parts.push(table(["Incident", "Date", "Severity", "Title", "Matched"], r.incidents.map((i) =>
+    [el("code", {}, i.doc_id), i.date, i.severity === null ? "–" : i.severity, i.title, i.match])));
+  parts.push(el("div", { class: "muted" }, "Each incident's record: "
+    + r.incidents.map((i) => i.doc_id + " " + i.url).join("; ")));
+  return parts;
+}
+
 function renderAbstain(r) {
   return [el("p", { class: "asked" }, "No answer (" + r.reason + ")"), el("p", {}, r.message)];
 }
@@ -410,6 +430,7 @@ async function send(body, label) {
     }
     if (data.thread_id) setThread(data.thread_id);
     const render = { lineage: renderLineage, owner: renderOwner, search: renderSearch,
+                     history: renderHistory,
                      clarification: renderClarification, abstain: renderAbstain };
     addCard(label, [...render[data.kind](data), renderAttempts(data.attempts)]);
   } catch (err) {

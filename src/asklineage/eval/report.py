@@ -174,6 +174,8 @@ def summarize(scores: Sequence[TurnScore], llm: bool) -> dict:
     }
     search_turns = [s for s in scored if s.free_text and s.expected.kind == "search"]
     summary["search"] = {"read_as_search": _share(search_turns, lambda s: s.kind == "search")}
+    history_turns = [s for s in scored if s.free_text and s.expected.kind == "history"]
+    summary["history"] = {"read_as_history": _share(history_turns, lambda s: s.kind == "history")}
     summary["follow_ups"] = {}
     for value in ("yes", "no", "either"):
         turns = [s for s in scored if s.same_node == value]
@@ -207,6 +209,9 @@ def _got(score: TurnScore) -> str:
     if score.kind == "search":
         hits = score.response["hits"]
         return f"search {hits[0]['display_name'] if hits else 'no hits'}"
+    if score.kind == "history":
+        incidents = score.response["incidents"]
+        return f"history {incidents[0]['doc_id'] if incidents else 'no incidents'}"
     if score.kind == "owner":
         return f"owner {score.response['node']['display_name']} {score.response['owner']}"
     return f"{score.kind} {score.reason}"
@@ -358,6 +363,11 @@ def render(info: RunInfo, golden: GoldenSet, summary: dict, scores: Sequence[Tur
         lines += _table(
             ("check", "result"),
             [("read as search questions", fmt(summary["search"]["read_as_search"]))],
+        )
+        lines += ["", "## History questions (intent only; `eval incidents` scores retrieval)", ""]
+        lines += _table(
+            ("check", "result"),
+            [("read as history questions", fmt(summary["history"]["read_as_history"]))],
         )
         lines += ["", "## Follow-ups", ""]
         lines += _table(
