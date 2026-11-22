@@ -11,9 +11,12 @@ from asklineage.eval.incident_eval import (
     check_against_corpus,
     load_incident_set,
     run_incident_eval,
+    runs,
 )
+from asklineage.eval.incident_eval import render as render_incidents
 from asklineage.incidents.search import DocHit, NoVectorsError, find_incidents, rrf
 from asklineage.incidents.store import index_incidents
+from asklineage.search.scan import SCANS
 
 ROOT = Path(__file__).parent.parent
 COMMITTED = ROOT / "config" / "incident_questions.calitp.yml"
@@ -128,9 +131,18 @@ def test_keyword_matches_any_word_and_ranks_by_best_chunk(conn, indexed):
     assert hits[1].section == "Fix"
 
 
-def test_vector_and_hybrid_return_documents_once(conn, indexed):
+@pytest.mark.parametrize("scan", SCANS)
+def test_vector_and_hybrid_return_documents_once(conn, indexed, scan):
     for method in ("vector", "hybrid"):
-        found = ids(conn, "timezone problem in the feeds table", method, indexed)
+        hits = find_incidents(
+            conn,
+            "timezone problem in the feeds table",
+            method,
+            indexed,
+            project=TEST_PROJECT,
+            scan=scan,
+        )
+        found = [h.doc_id for h in hits]
         assert sorted(found) == ["inc-001", "inc-002", "inc-003"]
         assert found[0] == "inc-003"
 
@@ -157,6 +169,9 @@ def test_eval_scores_each_method(conn, indexed, tmp_path):
             "  - {id: x1, category: none, question: 'billing export late?'}\n",
         )
     )
-    results = run_incident_eval(conn, incident_set, indexed, ("names", "keyword"))
+    plan = runs(("names", "keyword", "vector"), [("exact", 4), ("hnsw", 2)])
+    results = run_incident_eval(conn, incident_set, indexed, plan)
+    assert list(results) == ["names", "keyword", "vector", "vector[hnsw x2]"]
     assert results["names"]["summary"]["overall"]["hit@1"] == 1
     assert results["keyword"]["summary"]["overall"]["n"] == 1
+    assert "p95 ms" in render_incidents(results, "header")

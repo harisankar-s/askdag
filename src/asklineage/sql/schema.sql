@@ -93,6 +93,9 @@ CREATE TABLE IF NOT EXISTS node_chunks (
 );
 
 CREATE INDEX IF NOT EXISTS node_chunks_project_idx ON node_chunks (project_name);
+-- Used only when SEARCH_VECTOR_SCAN=hnsw (ADR 0018); pgvector's default m and ef_construction.
+CREATE INDEX IF NOT EXISTS node_chunks_embedding_hnsw_idx
+    ON node_chunks USING hnsw (embedding vector_cosine_ops);
 
 -- A search index of incident write-ups, not their system of record (ADR 0015). In production
 -- the record is a ticketing tool; here the Markdown corpus stands in for its export (ADR 0014).
@@ -133,3 +136,5 @@ CREATE TABLE IF NOT EXISTS doc_chunks (
 );
 
 CREATE INDEX IF NOT EXISTS doc_chunks_search_idx ON doc_chunks USING gin (search);
+CREATE INDEX IF NOT EXISTS doc_chunks_embedding_hnsw_idx
+    ON doc_chunks USING hnsw (embedding vector_cosine_ops);

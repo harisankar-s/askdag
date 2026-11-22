@@ -1,5 +1,6 @@
 from dataclasses import replace
 
+import pytest
 from helpers import TEST_PROJECT, make_node
 
 from asklineage.embed.base import index_name
@@ -8,14 +9,17 @@ from asklineage.embed.store import sync_chunks
 from asklineage.eval.search_eval import (
     KIND_SETS,
     Config,
+    WarmEmbedder,
     cutoff_table,
     families,
+    percentile,
     render,
     run_search_eval,
     score_question,
     summarize,
 )
 from asklineage.eval.search_set import SearchQuestion, SearchSet
+from asklineage.search.scan import variants
 
 
 def test_rank_is_the_first_expected_hit():
@@ -118,3 +122,70 @@ def test_families_walk_up_two_hops_only():
         "q": frozenset({"stg", "source"}),
         "n": frozenset(),
     }
+
+
+def test_warm_embedder_embeds_each_question_once_and_times_it():
+    calls = []
+
+    class Counting(HashingEmbedder):
+        def embed(self, texts, *, kind):
+            calls.append(tuple(texts))
+            return super().embed(texts, kind=kind)
+
+    inner = Counting()
+    warm = WarmEmbedder(inner, ["a", "b", "a"])
+
+    assert warm.embed(["b"], kind="query").vectors == inner.embed(["b"], kind="query").vectors
+    assert calls[:2] == [("a",), ("b",)] and len(warm.latencies_ms) == 2
+    assert index_name(warm) == index_name(inner)
+    with pytest.raises(KeyError):
+        warm.embed(["unseen"], kind="query")
+    with pytest.raises(ValueError, match="question vectors"):
+        warm.embed(["a"], kind="document")
+
+
+def test_percentile_is_nearest_rank():
+    values = [float(v) for v in range(1, 21)]
+
+    assert (percentile(values, 0.5), percentile(values, 0.95)) == (10.0, 19.0)
+    assert percentile([], 0.95) == 0.0
+
+
+def test_exact_runs_once_and_the_other_scans_at_each_overfetch():
+    assert variants(["exact", "topn", "hnsw"], [2, 8]) == [
+        ("exact", 2),
+        ("topn", 2),
+        ("topn", 8),
+        ("hnsw", 2),
+        ("hnsw", 8),
+    ]
+
+
+def test_scan_configs_get_their_own_labels(conn, load_graph):
+    stops = replace(make_node("dim_stops"), description="One row per bus stop location.")
+    load_graph([stops], [])
+    embedder = HashingEmbedder()
+    sync_chunks(conn, TEST_PROJECT, embedder)
+    search_set = SearchSet(
+        TEST_PROJECT,
+        (SearchQuestion("q1", "described", "bus stop location", ("dim_stops",)),),
+        "sha",
+    )
+    full = KIND_SETS[-1]
+    configs = [Config("semantic", full, (), scan, 2) for scan in ("exact", "topn", "hnsw")]
+
+    results = run_search_eval(
+        conn,
+        search_set,
+        {"q1": (stops.unique_id,)},
+        WarmEmbedder(embedder, ["bus stop location"]),
+        configs,
+    )
+
+    assert list(results) == [
+        "semantic:summary+columns+sql",
+        "semantic[topn x2]:summary+columns+sql",
+        "semantic[hnsw x2]:summary+columns+sql",
+    ]
+    assert all(r["summary"]["overall"]["hit@1"] == 1 for r in results.values())
+    assert all("latency_p95_ms" in r["summary"] for r in results.values())

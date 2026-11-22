@@ -21,6 +21,7 @@ from asklineage.embed.base import EmbeddingProvider, index_name
 from asklineage.embed.store import vector_literal
 from asklineage.incidents.chunks import detect_nodes, spellings
 from asklineage.incidents.store import ALL_DISPLAY_NAMES, DISPLAY_NAMES
+from asklineage.search.scan import Scan, fetch_size, vector_scan
 
 Method = Literal["names", "keyword", "vector", "hybrid", "routed"]
 METHODS: tuple[Method, ...] = get_args(Method)
@@ -84,6 +85,28 @@ VECTOR = """
     LIMIT %(k)s
 """
 
+# topn and hnsw (search/scan.py): an index can serve only ORDER BY distance LIMIT n.
+VECTOR_NEAREST = """
+    WITH near AS (
+        SELECT c.project_name, c.doc_id, c.section, c.content, c.ordinal,
+               c.embedding <=> %(vector)s::vector AS distance
+        FROM doc_chunks c
+        WHERE (%(project)s::text IS NULL OR c.project_name = %(project)s)
+          AND c.model = %(model)s
+        ORDER BY c.embedding <=> %(vector)s::vector
+        LIMIT %(fetch)s
+    ), best AS (
+        SELECT DISTINCT ON (doc_id) project_name, doc_id, section, content, distance
+        FROM near
+        ORDER BY doc_id, distance, project_name, ordinal
+    )
+    SELECT b.project_name AS project, b.doc_id, d.title, 1 - b.distance AS score, b.section,
+           b.content
+    FROM best b JOIN documents d ON d.project_name = b.project_name AND d.doc_id = b.doc_id
+    ORDER BY b.distance, b.doc_id
+    LIMIT %(k)s
+"""
+
 
 class NoVectorsError(LookupError):
     pass
@@ -118,28 +141,43 @@ def find_incidents(
     *,
     project: str | None,
     k: int = 10,
+    scan: Scan = "topn",
+    overfetch: int = 4,
+    ef_search: int | None = None,
 ) -> tuple[DocHit, ...]:
-    """project None searches every loaded project."""
+    """project None searches every loaded project. scan, overfetch, ef_search: search/scan.py."""
     params = {"project": project, "question": question, "k": k}
+    nearest = Nearest(scan, overfetch, ef_search)
     if method == "names":
         ids = named_nodes(conn, project, question)
         return _rows(conn, NAMES, params | {"ids": list(ids), "hops": UPSTREAM_HOPS}) if ids else ()
     if method == "keyword":
         return _rows(conn, KEYWORD, params)
     if method == "vector":
-        return _vector(conn, question, embedder, params)
+        return _vector(conn, question, embedder, params, nearest)
     if method == "hybrid":
-        return _hybrid(conn, question, embedder, params, k)
+        return _hybrid(conn, question, embedder, params, k, nearest)
     if method == "routed":
         named = find_incidents(conn, question, "names", embedder, project=project, k=k)
         seen = {(hit.project, hit.doc_id) for hit in named}
-        rest = _hybrid(conn, question, embedder, params, k)
+        rest = _hybrid(conn, question, embedder, params, k, nearest)
         return (*named, *(h for h in rest if (h.project, h.doc_id) not in seen))[:k]
     raise ValueError(f"method must be one of {METHODS}, got {method!r}")
 
 
+@dataclass(frozen=True)
+class Nearest:
+    scan: Scan = "topn"
+    overfetch: int = 4
+    ef_search: int | None = None
+
+
 def _vector(
-    conn: psycopg.Connection, question: str, embedder: EmbeddingProvider | None, params: dict
+    conn: psycopg.Connection,
+    question: str,
+    embedder: EmbeddingProvider | None,
+    params: dict,
+    nearest: Nearest,
 ) -> tuple[DocHit, ...]:
     if embedder is None:
         raise NoVectorsError("vector search needs an embedding model (EMBED_PROVIDER)")
@@ -153,7 +191,12 @@ def _vector(
     if not present:
         raise NoVectorsError(f"no incident chunks embedded with {tag!r}; run `load-docs`")
     vector = vector_literal(embedder.embed([question], kind="query").vectors[0])
-    return _rows(conn, VECTOR, params | {"vector": vector, "model": tag})
+    params = params | {"vector": vector, "model": tag}
+    if nearest.scan == "exact":
+        return _rows(conn, VECTOR, params)
+    fetch = fetch_size(params["k"], nearest.overfetch)
+    with vector_scan(conn, nearest.scan, fetch, nearest.ef_search):
+        return _rows(conn, VECTOR_NEAREST, params | {"fetch": fetch})
 
 
 def _hybrid(
@@ -162,10 +205,11 @@ def _hybrid(
     embedder: EmbeddingProvider | None,
     params: dict,
     k: int,
+    nearest: Nearest,
 ) -> tuple[DocHit, ...]:
     lists = [
         _rows(conn, KEYWORD, params | {"k": CANDIDATES}),
-        _vector(conn, question, embedder, params | {"k": CANDIDATES}),
+        _vector(conn, question, embedder, params | {"k": CANDIDATES}, nearest),
     ]
     return tuple(rrf(lists)[:k])
 

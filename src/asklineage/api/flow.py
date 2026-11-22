@@ -79,6 +79,7 @@ from asklineage.lineage.resolve import (
 )
 from asklineage.llm.base import LLMProvider
 from asklineage.search.query import search
+from asklineage.search.scan import Scan
 
 HISTORY_INCIDENTS = 3
 HISTORY_SECTIONS = ("Summary", "Root cause", "Fix")
@@ -113,6 +114,9 @@ class SearchOptions:
     prefer: tuple[str, ...] = ()  # path patterns for lineage-aware ranking; () turns it off
     low_confidence_below: float = 0.667
     k: int = 10
+    scan: Scan = "topn"  # how vector queries find the nearest chunks (search/scan.py)
+    overfetch: int = 4
+    ef_search: int | None = None
 
 
 @dataclass(frozen=True)
@@ -420,6 +424,9 @@ def find(state: AskState, runtime: Runtime[AskContext]) -> AskState:
         project=request.project,
         k=options.k,
         prefer=options.prefer,
+        scan=options.scan,
+        overfetch=options.overfetch,
+        ef_search=options.ef_search,
     )
     hits = [
         SearchHit(
@@ -462,7 +469,15 @@ def recall(state: AskState, runtime: Runtime[AskContext]) -> AskState:
     embedder = context.search.embedder
     mode = "hybrid" if embedder else "keyword"
     hits = find_incidents(
-        context.conn, request.question, mode, embedder, project=request.project, k=HISTORY_INCIDENTS
+        context.conn,
+        request.question,
+        mode,
+        embedder,
+        project=request.project,
+        k=HISTORY_INCIDENTS,
+        scan=context.search.scan,
+        overfetch=context.search.overfetch,
+        ef_search=context.search.ef_search,
     )
     found = incident_sections(context.conn, hits, HISTORY_SECTIONS)
     with context.conn.cursor(row_factory=dict_row) as cur:
@@ -558,6 +573,9 @@ def search_options(settings: Settings) -> SearchOptions:
         embedder=get_embedder(settings),
         prefer=tuple(settings.search_preferred_paths),
         low_confidence_below=settings.search_low_confidence_below,
+        scan=settings.search_vector_scan,
+        overfetch=settings.search_overfetch,
+        ef_search=settings.search_hnsw_ef_search,
     )
 
 

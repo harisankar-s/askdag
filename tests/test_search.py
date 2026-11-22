@@ -1,13 +1,16 @@
 from dataclasses import replace
 
+import psycopg
 import pytest
 from helpers import TEST_PROJECT, make_node
 
+from asklineage.embed.base import index_name
 from asklineage.embed.hashing import HashingEmbedder
-from asklineage.embed.store import sync_chunks
+from asklineage.embed.store import sync_chunks, vector_literal
 from asklineage.ingest.load import load_manifest
 from asklineage.ingest.manifest import Column, ParsedManifest
-from asklineage.search.query import search
+from asklineage.search.query import SEMANTIC_NEAREST, search
+from asklineage.search.scan import SCANS, vector_scan
 
 STOPS = replace(
     make_node("dim_stops", owner="gtfs-team"), description="One row per bus stop location."
@@ -175,3 +178,84 @@ def test_one_upstream_node_lifts_at_most_three_marts(conn):
     )
 
     assert sum(1 for hit in result.hits if hit.via) == 3
+
+
+@pytest.mark.parametrize("scan", SCANS)
+def test_every_scan_finds_the_same_nodes_on_a_small_project(embedded, scan):
+    conn, embedder = embedded
+
+    exact = search(conn, "bus stop location", embedder, project=TEST_PROJECT)
+    other = search(conn, "bus stop location", embedder, project=TEST_PROJECT, scan=scan)
+
+    assert names(other) == names(exact)
+    assert [round(hit.score, 6) for hit in other.hits] == [
+        round(hit.score, 6) for hit in exact.hits
+    ]
+
+
+def test_topn_keeps_each_nodes_best_among_the_nearest_chunks(embedded):
+    conn, embedder = embedded
+    question = "bus stop location wheelchair boarding"
+    vector = vector_literal(embedder.embed([question], kind="query").vectors[0])
+    chunks = conn.execute(
+        "SELECT node_id FROM node_chunks WHERE model = %s AND project_name = %s "
+        "ORDER BY embedding <=> %s::vector LIMIT 2",
+        (index_name(embedder), TEST_PROJECT, vector),
+    ).fetchall()
+
+    result = search(conn, question, embedder, project=TEST_PROJECT, k=2, scan="topn", overfetch=1)
+
+    assert [hit.unique_id for hit in result.hits] == list(
+        dict.fromkeys(r["node_id"] for r in chunks)
+    )
+
+
+@pytest.mark.parametrize(("scan", "uses_index"), [("topn", False), ("hnsw", True)])
+def test_only_the_hnsw_scan_plans_the_vector_index(embedded, scan, uses_index):
+    conn, embedder = embedded
+    params = {
+        "vector": vector_literal(embedder.embed(["bus stop"], kind="query").vectors[0]),
+        "model": index_name(embedder),
+        "kinds": ["summary", "columns", "sql"],
+        "project": TEST_PROJECT,
+        "fetch": 8,
+        "k": 2,
+    }
+
+    with vector_scan(conn, scan, 8):
+        plan = "\n".join(
+            r["QUERY PLAN"] for r in conn.execute("EXPLAIN " + SEMANTIC_NEAREST, params)
+        )
+
+    assert ("node_chunks_embedding_hnsw_idx" in plan) is uses_index
+
+
+def test_scan_settings_are_undone_after_the_query(conn):
+    names = ("enable_seqscan", "enable_sort", "enable_indexscan", "hnsw.ef_search")
+
+    def settings():
+        return {
+            name: conn.execute("SELECT current_setting(%s, true) AS v", (name,)).fetchone()["v"]
+            for name in names
+        }
+
+    conn.execute("SELECT '[1]'::vector")  # loads pgvector, so hnsw.* are real settings
+    before = settings()
+    with vector_scan(conn, "hnsw", 120):
+        during = settings()
+    with pytest.raises(psycopg.errors.DivisionByZero), vector_scan(conn, "topn", 8):
+        conn.execute("SELECT 1 / 0")
+
+    assert (during["enable_seqscan"], during["hnsw.ef_search"]) == ("off", "120")
+    assert settings() == before
+
+
+def test_an_ef_search_override_replaces_the_fetch_size(conn):
+    def ef_search():
+        return conn.execute("SELECT current_setting('hnsw.ef_search') AS v").fetchone()["v"]
+
+    conn.execute("SELECT '[1]'::vector")
+    with vector_scan(conn, "hnsw", 40, ef_search=100):
+        assert ef_search() == "100"
+    with vector_scan(conn, "hnsw", 40, ef_search=5000):
+        assert ef_search() == "1000"

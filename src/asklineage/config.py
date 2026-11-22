@@ -5,6 +5,7 @@ from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from asklineage.llm.openai_compatible import ResponseFormat
+from asklineage.search.scan import Scan
 
 
 class Settings(BaseSettings):
@@ -39,6 +40,13 @@ class Settings(BaseSettings):
     # A semantic top score below this is flagged low confidence (ADR 0012: 0.667 caught 3 of 5
     # unanswerable Cal-ITP questions and blocked 1 of 30). A flag, not an abstain.
     search_low_confidence_below: float = Field(default=0.667, ge=0, le=1)
+    # How vector queries find the nearest chunks (search/scan.py, ADR 0018): topn matches exact
+    # on Cal-ITP at half the latency; switch to hnsw near 10k chunks, after `eval vector-scale`.
+    search_vector_scan: Scan = "topn"
+    # topn and hnsw fetch k x this many chunks before keeping each node's or document's best.
+    search_overfetch: int = Field(default=4, ge=1, le=50)
+    # HNSW's candidate list (ADR 0018: 100 kept recall at 0.98 on 100k padded chunks).
+    search_hnsw_ef_search: int = Field(default=100, ge=1, le=1000)
 
 
 @lru_cache

@@ -21,6 +21,7 @@ from psycopg.rows import dict_row
 from asklineage.embed.base import EmbeddingProvider, index_name
 from asklineage.embed.chunks import CHUNK_KINDS, ChunkKind
 from asklineage.embed.store import vector_literal
+from asklineage.search.scan import Scan, fetch_size, vector_scan
 
 type Mode = Literal["semantic", "keyword"]
 
@@ -33,6 +34,27 @@ SEMANTIC = """
           AND (%(project)s::text IS NULL OR c.project_name = %(project)s)
           AND (%(ids)s::text[] IS NULL OR c.node_id = ANY(%(ids)s))
         ORDER BY c.node_id, distance
+    )
+    SELECT n.unique_id, n.name, n.source_name, n.resource_type, n.owner, n.owner_source,
+           n.file_path, b.kind, b.content, 1 - b.distance AS score
+    FROM best b JOIN nodes n ON n.unique_id = b.node_id
+    ORDER BY b.distance, n.unique_id
+    LIMIT %(k)s
+"""
+
+# topn and hnsw (search/scan.py): an index can serve only ORDER BY distance LIMIT n.
+SEMANTIC_NEAREST = """
+    WITH near AS (
+        SELECT c.node_id, c.kind, c.content, c.embedding <=> %(vector)s::vector AS distance
+        FROM node_chunks c
+        WHERE c.model = %(model)s AND c.kind = ANY(%(kinds)s)
+          AND (%(project)s::text IS NULL OR c.project_name = %(project)s)
+        ORDER BY c.embedding <=> %(vector)s::vector
+        LIMIT %(fetch)s
+    ), best AS (
+        SELECT DISTINCT ON (node_id) node_id, kind, content, distance
+        FROM near
+        ORDER BY node_id, distance
     )
     SELECT n.unique_id, n.name, n.source_name, n.resource_type, n.owner, n.owner_source,
            n.file_path, b.kind, b.content, 1 - b.distance AS score
@@ -135,8 +157,12 @@ def search(
     k: int = 10,
     keyword_only: bool = False,
     prefer: Sequence[str] = (),
+    scan: Scan = "topn",
+    overfetch: int = 4,
+    ef_search: int | None = None,
 ) -> SearchResult:
-    """prefer: path patterns of the nodes users should query (marts); empty turns lifting off."""
+    """prefer: path patterns of the nodes users should query (marts); empty turns lifting off.
+    scan, overfetch, ef_search: how the nearest chunks are found (search/scan.py)."""
     params = {"project": project, "kinds": list(kinds), "k": k, "question": question, "ids": None}
     note = None
     if embedder is not None and not keyword_only:
@@ -144,14 +170,30 @@ def search(
         if has_embeddings(conn, tag, project):
             vector = embedder.embed([question], kind="query").vectors[0]
             params |= {"vector": vector_literal(vector), "model": tag}
+            first = params if not prefer else params | {"k": CANDIDATES}
+            candidates = nearest(conn, first, scan, overfetch, ef_search)
             if not prefer:
-                return SearchResult("semantic", _rows(conn, SEMANTIC, params), tag)
-            candidates = _rows(conn, SEMANTIC, params | {"k": CANDIDATES})
+                return SearchResult("semantic", candidates, tag)
             return SearchResult("semantic", _lift(conn, candidates, params, prefer, k), tag)
         note = f"no embeddings tagged {tag!r} yet; run `asklineage embed`"
     elif embedder is None and not keyword_only:
         note = "EMBED_PROVIDER=none"
     return SearchResult("keyword", _rows(conn, KEYWORD, params), note=note)
+
+
+def nearest(
+    conn: psycopg.Connection,
+    params: dict,
+    scan: Scan,
+    overfetch: int,
+    ef_search: int | None = None,
+) -> tuple[Hit, ...]:
+    """The k nodes whose best chunk is nearest the question vector."""
+    if scan == "exact":
+        return _rows(conn, SEMANTIC, params)
+    fetch = fetch_size(params["k"], overfetch)
+    with vector_scan(conn, scan, fetch, ef_search):
+        return _rows(conn, SEMANTIC_NEAREST, params | {"fetch": fetch})
 
 
 def _lift(

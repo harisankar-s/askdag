@@ -5,6 +5,7 @@ import json
 import textwrap
 import time
 from collections import Counter
+from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from asklineage.corpus.docs import describe as describe_corpus
 from asklineage.corpus.scaffold import scaffold, write_scaffold
 from asklineage.diff.compare import ProjectMismatchError, diff_manifests
 from asklineage.diff.report import diff_json, render_diff
-from asklineage.embed.base import EmbeddingError, cosine, index_name
+from asklineage.embed.base import EmbeddingError, EmbeddingProvider, cosine, index_name
 from asklineage.embed.chunks import CHUNK_KINDS
 from asklineage.embed.factory import get_embedder
 from asklineage.embed.store import sync_chunks
@@ -41,11 +42,20 @@ from asklineage.eval.incident_eval import (
     check_against_corpus,
     load_incident_set,
     run_incident_eval,
+    runs,
 )
 from asklineage.eval.incident_eval import render as render_incidents
 from asklineage.eval.report import render, summarize
 from asklineage.eval.run import EvalContext, run_golden, run_info, write_run
-from asklineage.eval.search_eval import KIND_SETS, Config, families, run_search_eval
+from asklineage.eval.search_eval import (
+    KIND_SETS,
+    Config,
+    WarmEmbedder,
+    families,
+    percentile,
+    run_search_eval,
+)
+from asklineage.eval.search_eval import K as SEARCH_K
 from asklineage.eval.search_eval import render as render_search
 from asklineage.eval.search_set import (
     SearchSetError,
@@ -54,6 +64,8 @@ from asklineage.eval.search_set import (
     load_search_set,
 )
 from asklineage.eval.truth import truth_graph
+from asklineage.eval.vector_scale import BUILD_MEMORY, NoSourceVectorsError, run_vector_scale
+from asklineage.eval.vector_scale import render as render_scale
 from asklineage.incidents.search import METHODS, NoVectorsError
 from asklineage.incidents.store import index_incidents
 from asklineage.ingest.load import apply_schema, load_manifest
@@ -71,6 +83,7 @@ from asklineage.lineage.resolve import (
 from asklineage.llm.base import LLMError
 from asklineage.llm.factory import get_provider
 from asklineage.search.query import SearchResult, search
+from asklineage.search.scan import SCANS, Scan, fetch_size, variants
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -155,12 +168,38 @@ def main(argv: list[str] | None = None) -> None:
         "--questions", type=Path, default=Path("config/search_questions.calitp.yml")
     )
     search_eval.add_argument("--out", type=Path, default=Path("data/eval/search"))
+    search_eval.add_argument(
+        "--kind-sets",
+        choices=("all", "full"),
+        default="all",
+        help="full: only summary+columns+sql (fewer configs when comparing scans)",
+    )
+    _scan_arguments(search_eval)
+    scale = evals.add_parser(
+        "vector-scale", help="Time exact vs HNSW vector scans on padded copies of the chunks"
+    )
+    scale.add_argument(
+        "--sizes",
+        type=_size_list,
+        default=[3_000, 30_000, 100_000],
+        help="comma-separated chunk counts (default 3000,30000,100000)",
+    )
+    scale.add_argument("--noise", type=float, default=0.3, help="noise length per padded vector")
+    scale.add_argument(
+        "--ef-search",
+        type=_size_list,
+        default=[40, 100, 200],
+        help="comma-separated HNSW candidate-list sizes to compare (default 40,100,200)",
+    )
+    scale.add_argument("--questions", type=Path, default=Path("config/search_questions.calitp.yml"))
+    scale.add_argument("--out", type=Path, default=Path("data/eval/vector-scale"))
     incidents_eval = evals.add_parser("incidents", help="Score incident search methods")
     incidents_eval.add_argument(
         "--questions", type=Path, default=Path("config/incident_questions.calitp.yml")
     )
     incidents_eval.add_argument("--dir", type=Path, default=Path("corpus/calitp"))
     incidents_eval.add_argument("--out", type=Path, default=Path("data/eval/incidents"))
+    _scan_arguments(incidents_eval)
     docs = commands.add_parser("load-docs", help="Index a corpus's incidents for search")
     docs.add_argument("--dir", type=Path, default=Path("corpus/calitp"))
     corpus = commands.add_parser("corpus", help="Scaffold and check the synthetic incident corpus")
@@ -204,6 +243,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "eval" and args.eval_command == "search-set":
         _eval_search_set(args)
         return
+    if args.command == "eval" and args.eval_command == "vector-scale":
+        _eval_vector_scale(args)
+        return
     if args.command == "corpus":
         _corpus(args)
         return
@@ -237,6 +279,9 @@ def main(argv: list[str] | None = None) -> None:
                     k=args.k,
                     keyword_only=args.keyword,
                     prefer=() if args.no_lineage else get_settings().search_preferred_paths,
+                    scan=get_settings().search_vector_scan,
+                    overfetch=get_settings().search_overfetch,
+                    ef_search=get_settings().search_hnsw_ef_search,
                 )
             )
         elif args.command == "eval" and args.eval_command == "golden":
@@ -256,6 +301,75 @@ def main(argv: list[str] | None = None) -> None:
 class _Ping(BaseModel):
     ok: bool
     reply: str
+
+
+def _scan_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--scan",
+        type=_scan_list,
+        help=f"comma-separated, from {', '.join(SCANS)} (default: SEARCH_VECTOR_SCAN)",
+    )
+    parser.add_argument(
+        "--overfetch",
+        type=_overfetch_list,
+        help="comma-separated, for topn and hnsw (default: SEARCH_OVERFETCH)",
+    )
+
+
+def _size_list(text: str) -> list[int]:
+    try:
+        sizes = [int(part.replace("_", "")) for part in text.split(",") if part.strip()]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("sizes must be whole numbers") from exc
+    if not sizes or min(sizes) < 1:
+        raise argparse.ArgumentTypeError("sizes must be 1 or more")
+    return sizes
+
+
+def _scan_list(text: str) -> list[Scan]:
+    scans = [part.strip() for part in text.split(",") if part.strip()]
+    unknown = [scan for scan in scans if scan not in SCANS]
+    if unknown or not scans:
+        raise argparse.ArgumentTypeError(f"scans must be from {', '.join(SCANS)}")
+    return scans  # type: ignore[return-value]
+
+
+def _overfetch_list(text: str) -> list[int]:
+    try:
+        values = [int(part) for part in text.split(",") if part.strip()]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("overfetch must be whole numbers") from exc
+    if not values or min(values) < 1:
+        raise argparse.ArgumentTypeError("overfetch must be 1 or more")
+    return values
+
+
+def _scan_variants(args: argparse.Namespace) -> list[tuple[Scan, int]]:
+    settings = get_settings()
+    return variants(
+        args.scan or [settings.search_vector_scan], args.overfetch or [settings.search_overfetch]
+    )
+
+
+def _warm(embedder: EmbeddingProvider | None, questions: list[str]) -> WarmEmbedder | None:
+    if embedder is None:
+        return None
+    warm = WarmEmbedder(embedder, questions)
+    print(
+        f"  embedded {len(warm.latencies_ms)} questions: "
+        f"p50 {percentile(warm.latencies_ms, 0.5):.1f} ms, "
+        f"p95 {percentile(warm.latencies_ms, 0.95):.1f} ms (not counted in search latency)"
+    )
+    return warm
+
+
+def _embed_timing(warm: WarmEmbedder | None) -> dict | None:
+    if warm is None:
+        return None
+    return {
+        "p50_ms": percentile(warm.latencies_ms, 0.5),
+        "p95_ms": percentile(warm.latencies_ms, 0.95),
+    }
 
 
 def _check_llm() -> None:
@@ -373,6 +487,7 @@ def _eval_incidents(conn: psycopg.Connection, args: argparse.Namespace) -> None:
         print(exc)
         raise SystemExit(1) from exc
     methods = METHODS if embedder else ("names", "keyword")
+    scans = _scan_variants(args)
     tag = index_name(embedder) if embedder else "keyword-only"
     header = (
         f"Incident eval: set {incident_set.sha}, {len(incident_set.questions)} questions, "
@@ -380,12 +495,13 @@ def _eval_incidents(conn: psycopg.Connection, args: argparse.Namespace) -> None:
     )
     print(header)
     try:
+        warm = _warm(embedder, [q.question for q in incident_set.questions])
         results = run_incident_eval(
             conn,
             incident_set,
-            embedder,
-            methods,
-            on_method=lambda method: print(f"  running {method}"),
+            warm,
+            runs(methods, scans, get_settings().search_hnsw_ef_search),
+            on_run=lambda run: print(f"  running {run.label}"),
         )
     except (NoVectorsError, EmbeddingError) as exc:
         print(f"Incident eval failed: {exc}")
@@ -394,9 +510,81 @@ def _eval_incidents(conn: psycopg.Connection, args: argparse.Namespace) -> None:
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     run_dir = args.out / f"{stamp}-{''.join(c if c.isalnum() else '-' for c in tag)}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    info = {"incident_set": incident_set.sha, "questions_file": str(args.questions), "vectors": tag}
+    info = {
+        "incident_set": incident_set.sha,
+        "questions_file": str(args.questions),
+        "vectors": tag,
+        "scans": scans,
+        "hnsw_ef_search": get_settings().search_hnsw_ef_search,
+        "embed_query": _embed_timing(warm),
+    }
     (run_dir / "results.json").write_text(
         json.dumps({"info": info, "results": results}, indent=2, sort_keys=True)
+    )
+    (run_dir / "report.txt").write_text(report)
+    print(report)
+    print(f"Wrote {run_dir}")
+
+
+def _eval_vector_scale(args: argparse.Namespace) -> None:
+    settings = get_settings()
+    embedder = get_embedder(settings)
+    if embedder is None:
+        print("EMBED_PROVIDER=none: the vector-scale run needs an embedding model.")
+        raise SystemExit(1)
+    try:
+        search_set = load_search_set(args.questions)
+    except SearchSetError as exc:
+        print(exc)
+        raise SystemExit(1) from exc
+    tag = index_name(embedder)
+    fetch = fetch_size(SEARCH_K, settings.search_overfetch)
+    header = (
+        f"Vector scale: vectors {tag!r}, {len(search_set.questions)} queries from set "
+        f"{search_set.sha}, fetch {fetch} chunks, noise {args.noise}, HNSW m=16 "
+        f"ef_construction=64, maintenance_work_mem {BUILD_MEMORY}, serial build"
+    )
+    print(header)
+    with psycopg.connect(settings.database_url, autocommit=True, row_factory=dict_row) as conn:
+        apply_schema(conn)
+        try:
+            warm = _warm(embedder, [q.question for q in search_set.questions])
+            queries = [
+                warm.embed([q.question], kind="query").vectors[0] for q in search_set.questions
+            ]
+            results = run_vector_scale(
+                conn,
+                tag,
+                queries,
+                args.sizes,
+                project=search_set.project,
+                fetch=fetch,
+                ef_searches=args.ef_search,
+                noise=args.noise,
+                dims=settings.embed_dimensions,
+                on_size=lambda size: print(f"  measuring {size} chunks"),
+            )
+        except (NoSourceVectorsError, EmbeddingError) as exc:
+            print(f"Vector scale failed: {exc}")
+            raise SystemExit(1) from exc
+    timing = _embed_timing(warm)
+    report = render_scale(results, header, timing["p95_ms"] if timing else None)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    run_dir = args.out / f"{stamp}-{''.join(c if c.isalnum() else '-' for c in tag)}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    info = {
+        "vectors": tag,
+        "search_set": search_set.sha,
+        "fetch": fetch,
+        "noise": args.noise,
+        "sizes": args.sizes,
+        "ef_search": args.ef_search,
+        "embed_query": timing,
+    }
+    (run_dir / "results.json").write_text(
+        json.dumps(
+            {"info": info, "results": [asdict(r) for r in results]}, indent=2, sort_keys=True
+        )
     )
     (run_dir / "report.txt").write_text(report)
     print(report)
@@ -416,11 +604,19 @@ def _eval_search(conn: psycopg.Connection, args: argparse.Namespace) -> None:
     except (StaleLoadError, SearchSetError) as exc:
         print(exc)
         raise SystemExit(1) from exc
-    modes = ["semantic", "keyword"] if embedder else ["keyword"]
-    configs = [Config(mode, kinds) for mode in modes for kinds in KIND_SETS]
+    kind_sets = KIND_SETS if args.kind_sets == "all" else KIND_SETS[-1:]
+    scans = _scan_variants(args)
     prefer = tuple(settings.search_preferred_paths)
-    if embedder and prefer:
-        configs[3:3] = [Config("semantic", kinds, prefer) for kinds in KIND_SETS]
+    configs = []
+    if embedder:
+        configs = [
+            Config("semantic", kinds, lift, scan, overfetch, settings.search_hnsw_ef_search)
+            for lift in ((), prefer)
+            if prefer or not lift
+            for scan, overfetch in scans
+            for kinds in kind_sets
+        ]
+    configs += [Config("keyword", kinds) for kinds in kind_sets]
     tag = index_name(embedder) if embedder else "keyword-only"
     header = (
         f"Search eval: set {search_set.sha}, {len(search_set.questions)} questions, "
@@ -430,11 +626,12 @@ def _eval_search(conn: psycopg.Connection, args: argparse.Namespace) -> None:
     )
     print(header)
     try:
+        warm = _warm(embedder, [q.question for q in search_set.questions])
         results = run_search_eval(
             conn,
             search_set,
             expected,
-            embedder,
+            warm,
             configs,
             on_config=lambda config: print(f"  running {config.label}"),
             family=families(graph.parents, expected),
@@ -452,6 +649,9 @@ def _eval_search(conn: psycopg.Connection, args: argparse.Namespace) -> None:
         "manifest": str(args.manifest),
         "vectors": tag,
         "query_prefix": settings.embed_query_prefix if embedder else None,
+        "scans": scans,
+        "hnsw_ef_search": get_settings().search_hnsw_ef_search,
+        "embed_query": _embed_timing(warm),
     }
     (run_dir / "results.json").write_text(
         json.dumps({"info": info, "results": results}, indent=2, sort_keys=True)

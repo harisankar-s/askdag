@@ -2,7 +2,8 @@
 
 One table: hit@k and MRR per method, overall and by category. Expected incidents come from
 the questions file, checked against the corpus so a question can't point at a missing or
-non-incident document. Scoring reuses the search eval's.
+non-incident document. Scoring reuses the search eval's, and so does its latency note: the
+search alone when the embedder is a WarmEmbedder.
 """
 
 import hashlib
@@ -18,18 +19,56 @@ import yaml
 
 from asklineage.corpus.docs import Corpus
 from asklineage.embed.base import EmbeddingProvider
-from asklineage.eval.search_eval import QuestionScore, score_question, summarize
+from asklineage.eval.search_eval import (
+    QuestionScore,
+    elapsed_ms,
+    scan_tag,
+    score_question,
+    summarize,
+)
 from asklineage.incidents.search import Method, find_incidents
+from asklineage.search.scan import Scan
 
 Category = Literal["named", "symptom", "loose", "decoy", "none"]
 CATEGORIES: tuple[str, ...] = get_args(Category)
 SET_VERSION = 1
 K = 10
 HIT_AT = (1, 3, 5)
+VECTOR_METHODS: frozenset[Method] = frozenset({"vector", "hybrid", "routed"})
+W = 24  # label column width in the report
 
 
 class IncidentSetError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class Run:
+    method: Method
+    scan: Scan = "exact"  # only the vector-backed methods use it
+    overfetch: int = 4
+    ef_search: int | None = None  # not in the label: one value per eval run
+
+    @property
+    def label(self) -> str:
+        return f"{self.method}{scan_tag(self.scan, self.overfetch)}"
+
+
+def runs(
+    methods: Sequence[Method],
+    scans: Sequence[tuple[Scan, int]],
+    ef_search: int | None = None,
+) -> list[Run]:
+    """Each vector-backed method once per (scan, overfetch); names and keyword once."""
+    return [
+        run
+        for method in methods
+        for run in (
+            [Run(method, scan, overfetch, ef_search) for scan, overfetch in scans]
+            if method in VECTOR_METHODS
+            else [Run(method)]
+        )
+    ]
 
 
 @dataclass(frozen=True)
@@ -96,14 +135,29 @@ def check_against_corpus(incident_set: IncidentSet, corpus: Corpus) -> None:
 def run_method(
     conn: psycopg.Connection,
     incident_set: IncidentSet,
-    method: Method,
+    run: Run,
     embedder: EmbeddingProvider | None,
 ) -> list[QuestionScore]:
+    def find(question: str):
+        return find_incidents(
+            conn,
+            question,
+            run.method,
+            embedder,
+            project=incident_set.project,
+            k=K,
+            scan=run.scan,
+            overfetch=run.overfetch,
+            ef_search=run.ef_search,
+        )
+
+    if incident_set.questions:
+        find(incident_set.questions[0].question)  # warm-up, so no run pays for a cold cache
     scores = []
     for q in incident_set.questions:
         started = time.perf_counter()
-        hits = find_incidents(conn, q.question, method, embedder, project=incident_set.project, k=K)
-        latency_ms = round((time.perf_counter() - started) * 1000)
+        hits = find(q.question)
+        latency_ms = elapsed_ms(started)
         returned = [hit.doc_id for hit in hits]
         top = hits[0].score if hits else None
         scores.append(score_question(q.id, q.category, q.expected, returned, top, latency_ms))
@@ -114,15 +168,15 @@ def run_incident_eval(
     conn: psycopg.Connection,
     incident_set: IncidentSet,
     embedder: EmbeddingProvider | None,
-    methods: Sequence[Method],
-    on_method: Callable[[Method], None] | None = None,
+    plan: Sequence[Run],
+    on_run: Callable[[Run], None] | None = None,
 ) -> dict[str, dict]:
     results = {}
-    for method in methods:
-        if on_method:
-            on_method(method)
-        scores = run_method(conn, incident_set, method, embedder)
-        results[method] = {
+    for run in plan:
+        if on_run:
+            on_run(run)
+        scores = run_method(conn, incident_set, run, embedder)
+        results[run.label] = {
             "summary": summarize(scores),
             "questions": [{**asdict(s), "top": list(s.top)} for s in scores],
         }
@@ -131,23 +185,29 @@ def run_incident_eval(
 
 def render(results: Mapping[str, dict], header: str) -> str:
     cols = ["n", *(f"hit@{k}" for k in HIT_AT), "mrr"]
-    lines = [header, "", f"{'method':<10} {'p50 ms':>6}  " + "  ".join(f"{c:>6}" for c in cols)]
+    lines = [
+        header,
+        "",
+        f"{'method':<{W}} {'p50 ms':>7} {'p95 ms':>7}  " + "  ".join(f"{c:>6}" for c in cols),
+    ]
     for method, result in results.items():
-        overall = result["summary"]["overall"]
-        p50 = result["summary"]["latency_p50_ms"]
+        overall, summary = result["summary"]["overall"], result["summary"]
         cells = "  ".join(f"{overall.get(c, ''):>6}" for c in cols)
-        lines.append(f"{method:<10} {p50:>6.0f}  {cells}")
+        lines.append(
+            f"{method:<{W}} {summary['latency_p50_ms']:>7.1f} "
+            f"{summary['latency_p95_ms']:>7.1f}  {cells}"
+        )
 
     answerable = [c for c in CATEGORIES if c != "none"]
     lines += [
         "",
         "hit@3 by category",
-        f"{'method':<10} " + "  ".join(f"{c:>8}" for c in answerable),
+        f"{'method':<{W}} " + "  ".join(f"{c:>8}" for c in answerable),
     ]
     for method, result in results.items():
         by = result["summary"]["by_category"]
         cells = [f"{by[c]['hit@3']}/{by[c]['n']}" if c in by else "-" for c in answerable]
-        lines.append(f"{method:<10} " + "  ".join(f"{cell:>8}" for cell in cells))
+        lines.append(f"{method:<{W}} " + "  ".join(f"{cell:>8}" for cell in cells))
 
     lines += ["", "questions with no answer: results returned (top doc)"]
     for method, result in results.items():
@@ -156,7 +216,7 @@ def render(results: Mapping[str, dict], header: str) -> str:
             for q in result["questions"]
             if not q["expected"]
         ]
-        lines.append(f"{method:<10} " + ("; ".join(cells) or "-"))
+        lines.append(f"{method:<{W}} " + ("; ".join(cells) or "-"))
 
     misses: dict[str, list[str]] = defaultdict(list)
     for method, result in results.items():
