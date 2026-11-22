@@ -14,9 +14,7 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from psycopg.rows import dict_row
 from pydantic import BaseModel
 
-from asklineage.answer.claims import Highlights
-from asklineage.answer.generate import Attempt
-from asklineage.answer.lineage_answer import HighlightStatus, LineageAnswer, answer_lineage
+from asklineage.answer.lineage_answer import LineageAnswer, answer_lineage
 from asklineage.api.flow import checkpoint_serde, search_options
 from asklineage.api.threads import prune_threads
 from asklineage.config import get_settings
@@ -77,7 +75,6 @@ from asklineage.lineage.resolve import (
     Candidate,
     NotFound,
     Resolved,
-    node_display_names,
     resolve_node,
 )
 from asklineage.llm.base import LLMError
@@ -100,12 +97,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     show.add_argument("--depth", type=int, default=DEFAULT_DEPTH, help=f"1 to {MAX_DEPTH} hops")
     show.add_argument("--project", help="only match nodes in this dbt project")
-    show.add_argument(
-        "--summarize", action="store_true", help="add a summary, checked against the result"
-    )
-    show.add_argument(
-        "-v", "--verbose", action="store_true", help="with --summarize, show each LLM attempt"
-    )
+    show.add_argument("--summarize", action="store_true", help="add the summary and highlights")
     compare = commands.add_parser("diff", help="Compare two manifests and show what is downstream")
     compare.add_argument("old", type=Path)
     compare.add_argument("new", type=Path)
@@ -805,7 +797,6 @@ def _eval_run(conn: psycopg.Connection, args: argparse.Namespace) -> None:
         golden,
         llm_provider=settings.llm_provider,
         llm_model=settings.llm_model if provider else None,
-        max_named=settings.llm_max_named_nodes,
         source_repo=args.source_repo,
     )
     context = EvalContext(
@@ -814,7 +805,6 @@ def _eval_run(conn: psycopg.Connection, args: argparse.Namespace) -> None:
         graph,
         NameIndex(manifest, graph),
         owners,
-        settings.llm_max_named_nodes,
         search_options(settings),
     )
     total = sum(len(item.turns) for item in golden.items)
@@ -876,7 +866,7 @@ def _show_lineage(conn: psycopg.Connection, args: argparse.Namespace) -> None:
         case Resolved(node=node):
             result = lineage(conn, node.unique_id, args.direction, args.depth)
             if args.summarize:
-                print(_summarize(conn, result, node, args))
+                print(_summarize(result, node))
             _print_lineage(result)
         case Ambiguous(candidates=candidates):
             print(f"{args.name!r} matches {len(candidates)} nodes; pass one of these unique_ids:")
@@ -892,18 +882,8 @@ def _show_lineage(conn: psycopg.Connection, args: argparse.Namespace) -> None:
             raise SystemExit(1)
 
 
-def _summarize(
-    conn: psycopg.Connection, result: Lineage, root: Candidate, args: argparse.Namespace
-) -> str:
-    settings = get_settings()
-    answer = answer_lineage(
-        result,
-        root,
-        get_provider(settings),
-        max_named=settings.llm_max_named_nodes,
-        known_names=node_display_names(conn, args.project),
-    )
-    return format_summary(answer, verbose=args.verbose)
+def _summarize(result: Lineage, root: Candidate) -> str:
+    return format_summary(answer_lineage(result, root))
 
 
 def _wrap(text: str, first: str, rest: str) -> str:
@@ -912,54 +892,12 @@ def _wrap(text: str, first: str, rest: str) -> str:
     )
 
 
-def format_summary(answer: LineageAnswer, verbose: bool = False) -> str:
-    attempts = answer.attempts
-    latency = sum(a.latency_ms or 0 for a in attempts)
-    model = next((a.model for a in attempts if a.model), None)
+def format_summary(answer: LineageAnswer) -> str:
     lines = ["Summary", _wrap(answer.summary, "  ", "  ")]
-    match answer.status:
-        case HighlightStatus.PASSED:
-            lines.append(f"Highlights (grounded: {model}, {latency} ms)")
-        case HighlightStatus.PASSED_AFTER_RETRY:
-            lines.append(
-                f"Highlights (grounded on retry: {model}, {len(attempts)} attempts, {latency} ms)"
-            )
-        case HighlightStatus.REJECTED if attempts and attempts[-1].error:
-            lines.append("Highlights: none (the LLM could not be reached)")
-        case HighlightStatus.REJECTED:
-            hint = "" if verbose else "; run with --verbose to see why"
-            lines.append(f"Highlights: none (rejected by the check {len(attempts)} times{hint})")
-        case HighlightStatus.OFF:
-            lines.append("Highlights: off (no LLM configured)")
-        case HighlightStatus.SKIPPED:
-            pass
-    lines += [_wrap(text, "  - ", "    ") for text in answer.highlight_texts]
-    if verbose:
-        lines += _describe_attempts(attempts)
+    if answer.highlights:
+        lines.append("Highlights")
+        lines += [_wrap(text, "  - ", "    ") for text in answer.highlight_texts]
     return "\n".join(lines) + "\n"
-
-
-def _describe_attempts(attempts: tuple[Attempt, ...]) -> list[str]:
-    lines = []
-    for number, attempt in enumerate(attempts, start=1):
-        if attempt.error:
-            lines.append(f"  attempt {number}: error: {attempt.error}")
-            continue
-        count = len(attempt.violations)
-        outcome = "passed" if attempt.passed else f"{count} problem{'' if count == 1 else 's'}"
-        if attempt.model is None:
-            details = "reply was not valid JSON for the schema"
-        else:
-            details = f"{attempt.model}, {attempt.latency_ms} ms"
-            if attempt.input_tokens is not None:
-                details += f", {attempt.input_tokens} in / {attempt.output_tokens} out tokens"
-        lines.append(f"  attempt {number}: {outcome} ({details})")
-        for violation in attempt.violations:
-            lines.append(f"    - {violation}")
-            if violation.claim and isinstance(attempt.output, Highlights):
-                said = attempt.output.claims[violation.claim - 1].text
-                lines.append(f"      said: {said!r}")
-    return lines
 
 
 def _print_lineage(result: Lineage) -> None:

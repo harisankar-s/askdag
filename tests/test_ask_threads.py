@@ -6,7 +6,6 @@ import pytest
 from ask_examples import (
     EDGES,
     FCT_ORDERS,
-    HIGHLIGHTS,
     MART_WEEKLY,
     NODES,
     NOT_LINEAGE,
@@ -22,7 +21,6 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres import PostgresSaver
 from psycopg.rows import dict_row
 
-from asklineage.answer.lineage_answer import HighlightStatus
 from asklineage.api.flow import (
     Remembered,
     build_graph,
@@ -40,7 +38,6 @@ from asklineage.api.models import (
 from asklineage.api.threads import create_thread, prune_threads, touch_thread, try_lock_thread
 from asklineage.lineage.graph import Direction
 from asklineage.lineage.resolve import Ambiguous, Candidate
-from asklineage.llm.base import LLMError
 from asklineage.llm.scripted import ScriptedProvider
 
 
@@ -63,7 +60,7 @@ def turn(conn, threads, thread_id, provider=None, **fields):
     if "choose" not in fields:
         fields["project"] = TEST_PROJECT
     request = AskRequest(thread_id=thread_id, **fields)
-    return run_ask(conn, provider, request, max_named=20, graph=threads, thread_id=thread_id)
+    return run_ask(conn, provider, request, graph=threads, thread_id=thread_id)
 
 
 def names(response) -> list[str]:
@@ -87,15 +84,15 @@ def test_a_shared_name_pauses_the_thread_and_resumes_with_the_choice(conn, threa
 
 def test_resuming_does_not_read_the_question_again(conn, threads):
     thread_id = uuid4()
-    provider = ScriptedProvider([parse_reply("orders", depth=1), LLMError("down")])
+    provider = ScriptedProvider([parse_reply("orders", depth=1)])
 
     turn(conn, threads, thread_id, provider, question="What depends on orders, one hop?")
     chosen = turn(conn, threads, thread_id, provider, choose=RAW_ORDERS.unique_id)
 
     assert (chosen.direction, chosen.depth) == (Direction.DOWNSTREAM, 1)
     assert names(chosen) == ["stg_orders"]
-    assert [a.stage for a in chosen.attempts] == ["parse", "highlights"]
-    assert len(provider.calls) == 2
+    assert [a.stage for a in chosen.attempts] == ["parse"]
+    assert len(provider.calls) == 1
 
 
 def test_a_choice_that_was_not_offered_is_rejected(conn, threads):
@@ -120,7 +117,7 @@ def test_a_suggestion_for_a_typo_can_be_chosen(conn, threads):
 
 
 def test_without_a_thread_a_clarification_is_not_resumable(conn):
-    response = run_ask(conn, None, AskRequest(node="orders", project=TEST_PROJECT), max_named=20)
+    response = run_ask(conn, None, AskRequest(node="orders", project=TEST_PROJECT))
 
     assert response.resumable is False
     assert "node set to" in response.message
@@ -130,7 +127,7 @@ def test_without_a_thread_a_clarification_is_not_resumable(conn):
 def test_a_follow_up_reuses_the_previous_node(conn, threads):
     thread_id = uuid4()
     follow_up = parse_reply(entity=None, direction="upstream", same_node=True)
-    provider = ScriptedProvider([follow_up, LLMError("down")])
+    provider = ScriptedProvider([follow_up])
 
     turn(conn, threads, thread_id, node="stg_orders", depth=2)
     answer = turn(conn, threads, thread_id, provider, question="And upstream?")
@@ -145,7 +142,7 @@ def test_a_follow_up_that_names_another_node_cannot_claim_the_previous_one(conn,
     thread_id = uuid4()
     claimed = parse_reply(entity=None, direction=None, same_node=True)
     named = parse_reply("fct_orders", direction=None)
-    provider = ScriptedProvider([claimed, named, LLMError("down")])
+    provider = ScriptedProvider([claimed, named])
 
     turn(conn, threads, thread_id, node="stg_orders")
     answer = turn(conn, threads, thread_id, provider, question="And what does fct_orders feed?")
@@ -158,7 +155,7 @@ def test_a_retry_that_fixes_the_name_cannot_flip_the_direction(conn, threads):
     thread_id = uuid4()
     claimed = parse_reply(entity=None, direction="downstream", same_node=True)
     flipped = parse_reply("fct_orders", direction="upstream")
-    provider = ScriptedProvider([claimed, flipped, LLMError("down")])
+    provider = ScriptedProvider([claimed, flipped])
 
     turn(conn, threads, thread_id, node="stg_orders", direction="upstream")
     answer = turn(conn, threads, thread_id, provider, question="And what does fct_orders feed?")
@@ -169,7 +166,7 @@ def test_a_retry_that_fixes_the_name_cannot_flip_the_direction(conn, threads):
 
 def test_a_follow_up_about_another_node_keeps_direction_and_depth(conn, threads):
     thread_id = uuid4()
-    provider = ScriptedProvider([parse_reply("fct_orders", direction=None), LLMError("down")])
+    provider = ScriptedProvider([parse_reply("fct_orders", direction=None)])
 
     turn(conn, threads, thread_id, node="mart_weekly", direction="upstream", depth=1)
     answer = turn(conn, threads, thread_id, provider, question="What about fct_orders?")
@@ -203,12 +200,12 @@ def test_a_new_question_abandons_a_pending_choice(conn, threads):
 
 def test_the_checkpoint_keeps_the_previous_node_not_the_walk(conn, threads):
     thread_id = uuid4()
-    provider = ScriptedProvider([parse_reply(), HIGHLIGHTS])
+    provider = ScriptedProvider([parse_reply()])
 
     answer = turn(conn, threads, thread_id, provider, question=QUESTION)
     values = threads.get_state(thread_config(thread_id)).values
 
-    assert answer.highlight_status is HighlightStatus.PASSED
+    assert answer.highlights
     assert values["result"] is None
     assert values["response"].edges == answer.edges
     assert [(e.parent_id, e.child_id) for e in answer.edges] == [
@@ -289,7 +286,7 @@ def test_who_owns_it_follows_up_on_the_previous_node(conn, threads):
         conn,
         threads,
         thread_id,
-        ScriptedProvider([parse_reply(None, direction=None, same_node=True), LLMError("down")]),
+        ScriptedProvider([parse_reply(None, direction=None, same_node=True)]),
         question="And what feeds it?",
     )
 
@@ -323,7 +320,6 @@ def test_a_follow_up_naming_a_new_node_is_answered_about_it(conn, threads):
         [
             parse_reply("fct_orders", same_node=True),
             parse_reply(None, same_node=True),
-            LLMError("down"),
         ]
     )
 

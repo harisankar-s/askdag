@@ -136,7 +136,7 @@ def indexed(conn, load_graph):
 
 def ask(conn, provider, question):
     request = AskRequest(project=TEST_PROJECT, question=question)
-    return run_ask(conn, provider, request, max_named=20)
+    return run_ask(conn, provider, request)
 
 
 def test_a_history_question_lists_incidents_and_a_cited_summary(conn, indexed):

@@ -1,4 +1,4 @@
-"""A provider that replays canned replies, so answer and grounding code can be tested offline."""
+"""A provider that replays canned replies, so answer code can be tested offline."""
 
 import json
 from collections import deque

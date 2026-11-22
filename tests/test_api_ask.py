@@ -6,7 +6,6 @@ import pytest
 from ask_examples import (
     EDGES,
     FCT_ORDERS,
-    HIGHLIGHTS,
     MART_WEEKLY,
     NODES,
     ORDERS,
@@ -98,7 +97,9 @@ def test_structured_request_returns_the_lineage_contract(db_client):
     assert data["kind"] == "lineage"
     assert data["node"]["unique_id"] == STG_ORDERS.unique_id
     assert data["direction"] == "downstream"
-    assert data["highlight_status"] == "off"
+    assert data["highlights"][0]["text"] == (
+        "`fct_orders` (finance) reads directly from `stg_orders`."
+    )
     assert data["facts"]["by_depth"] == {"1": 1}
     assert data["table"] == [
         {
@@ -136,13 +137,13 @@ def test_an_upstream_walk_keeps_edges_parent_to_child(chain_client):
 
 
 def test_free_text_with_an_llm_returns_attempts_by_stage(db_client):
-    app.dependency_overrides[get_llm] = lambda: ScriptedProvider([PARSE, HIGHLIGHTS])
+    app.dependency_overrides[get_llm] = lambda: ScriptedProvider([PARSE])
 
     data = post(db_client, question="What depends on stg_orders?", project=TEST_PROJECT)
 
     assert data["kind"] == "lineage"
     assert data["highlights"][0]["text"].startswith("`fct_orders` (finance)")
-    assert [a["stage"] for a in data["attempts"]] == ["parse", "highlights"]
+    assert [a["stage"] for a in data["attempts"]] == ["parse"]
     assert all(a["passed"] for a in data["attempts"])
 
 

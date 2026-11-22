@@ -7,7 +7,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from asklineage.answer.facts import LineageFacts
 from asklineage.answer.generate import Attempt
-from asklineage.answer.lineage_answer import HighlightStatus
 from asklineage.answer.parse import MAX_QUESTION_CHARS
 from asklineage.lineage.graph import MAX_DEPTH, Direction, LineageNode
 from asklineage.lineage.resolve import Candidate
@@ -137,14 +136,14 @@ class FactsInfo(BaseModel):
 
 
 class HighlightInfo(BaseModel):
-    text: str  # with owner tags added by code
+    text: str  # with owner tags
     upstream: str
     downstream: str
     hops: Literal["direct", "indirect"]
 
 
 class AttemptInfo(BaseModel):
-    stage: Literal["parse", "highlights", "history"]
+    stage: Literal["parse", "history"]
     passed: bool
     error: str | None = None
     violations: list[str] = []
@@ -156,9 +155,7 @@ class AttemptInfo(BaseModel):
     output_tokens: int | None = None
 
     @classmethod
-    def from_attempt(
-        cls, stage: Literal["parse", "highlights", "history"], attempt: Attempt
-    ) -> Self:
+    def from_attempt(cls, stage: Literal["parse", "history"], attempt: Attempt) -> Self:
         return cls(
             stage=stage,
             passed=attempt.passed,
@@ -180,8 +177,7 @@ class LineageResponse(BaseModel):
     depth: int
     summary: str
     facts: FactsInfo
-    highlights: list[HighlightInfo]
-    highlight_status: HighlightStatus
+    highlights: list[HighlightInfo]  # chosen and written in code (ADR 0019)
     table: list[NodeRow]
     edges: list[EdgeInfo]  # parent -> child in both directions; may reference the root
     attempts: list[AttemptInfo] = []

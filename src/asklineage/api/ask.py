@@ -54,9 +54,8 @@ def ask(
     thread_graph: Annotated[CompiledStateGraph, Depends(get_thread_graph)],
     search: Annotated[SearchOptions, Depends(get_search)],
 ) -> AskResponse:
-    max_named = get_settings().llm_max_named_nodes
     if not request.start_thread and request.thread_id is None:
-        return run_ask(conn, provider, request, max_named=max_named, search_options=search)
+        return run_ask(conn, provider, request, search_options=search)
 
     if request.start_thread:
         thread_id = create_thread(conn)
@@ -72,7 +71,6 @@ def ask(
         conn,
         provider,
         request,
-        max_named=max_named,
         graph=thread_graph,
         thread_id=thread_id,
         search_options=search,

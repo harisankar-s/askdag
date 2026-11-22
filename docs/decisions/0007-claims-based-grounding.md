@@ -1,6 +1,6 @@
 # 7. Code writes the lineage facts; the LLM adds checked highlights
 
-**Status:** accepted, 2026-11-21 (revised the same day after four runs on Cal-ITP; history below)
+**Status:** superseded in part by ADR 0019 (2026-11-22): code now chooses and writes the highlights, so the LLM highlight, its prompt and its check are gone. The summary written in code stands. Originally accepted 2026-11-21, revised the same day after four runs on Cal-ITP; history below.
 
 ## Context
 A lineage answer is the full table from the SQL traversal (ADR 0001, 0005) plus a short text summary. The table can't be wrong in ways an LLM causes, but LLM-written text can: it can name a model that isn't in the result, reverse an edge, miscount, invent an owner, or leave out that the result was cut off at the depth limit. The provider is swappable (ADR 0006), down to a 7B local model.

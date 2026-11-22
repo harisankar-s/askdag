@@ -38,7 +38,7 @@ uv run ruff format . && uv run ruff check . && uv run pytest
 uv run asklineage init-db
 uv run asklineage load-manifest data/manifests/calitp/manifest.json --owners config/owners.calitp.yml
 uv run asklineage lineage dim_schedule_feeds --direction downstream --depth 2
-uv run asklineage lineage dim_schedule_feeds --direction downstream --depth 2 --summarize -v
+uv run asklineage lineage dim_schedule_feeds --direction downstream --depth 2 --summarize
 uv run python scripts/manifest_stats.py data/manifests/calitp/manifest.json
 uv run asklineage llm-check
 uv run asklineage embed-check
@@ -77,10 +77,10 @@ Stop `uvicorn --reload` before `uv add` or `uv sync`: the reloader watches `.ven
 
 ## Architecture (target)
 
-Sources (dbt manifests, model descriptions, incident docs) → ingestion (manifest parser, chunk and embed, incident loader) → Postgres + pgvector (lineage tables, vector chunks, incidents) → LangGraph flow (guard → classify → retrieve → answer + grounding check) → FastAPI. The LLM sits behind a narrow provider interface (`llm/base.py`). `LLM_PROVIDER=none` (the default) uses a template summary so a fresh clone needs no model; the first real adapter is OpenAI-compatible (local Ollama `qwen2.5:7b` for testers; any compatible gateway for enterprises). The author has no Bedrock account; a native Bedrock adapter is optional and later. A separate eval harness measures every layer.
+Sources (dbt manifests, model descriptions, incident docs) → ingestion (manifest parser, chunk and embed, incident loader) → Postgres + pgvector (lineage tables, vector chunks, incidents) → LangGraph flow (guard → classify → retrieve → answer; history sentences checked in code) → FastAPI. The LLM sits behind a narrow provider interface (`llm/base.py`). `LLM_PROVIDER=none` (the default) uses a template summary so a fresh clone needs no model; the first real adapter is OpenAI-compatible (local Ollama `qwen2.5:7b` for testers; any compatible gateway for enterprises). The author has no Bedrock account; a native Bedrock adapter is optional and later. A separate eval harness measures every layer.
 
 Key design rules:
-- **For lineage answers, code writes the facts; the LLM only adds highlights.** The table and the summary paragraph (counts, teams affected, `owner_source`, unowned, truncation) come from the SQL result. The LLM may add 1–3 relation highlights, each checked in code (edge or path exists in the stated direction, names, no numbers, no owner wording; code adds owner tags); failing highlights are dropped after one retry. Compute what is computable; generate only what needs language (ADR 0007).
+- **Lineage answers are all code; the LLM is used only where language is needed.** The table, the summary paragraph (counts, teams affected, `owner_source`, unowned, truncation) and up to 3 highlights (rule: one node per non-majority team or unowned, smallest first; then the furthest; then a direct one; template sentences, owner tags) come from the SQL result, with no LLM call (ADR 0007, 0019). The LLM reads free-text questions and summarises incidents with cited, checked sentences (ADR 0016). Compute what is computable; generate only what needs language.
 - Lineage is model-level only; column-level lineage needs SQL parsing (sqlglot, Phase 5).
 - Answers about owners must say where the owner came from (`owner_source`) and say when none is recorded.
 
@@ -93,14 +93,14 @@ Key design rules:
 | 2 | pgvector semantic search + question classifier | Done |
 | 3 | Incident retrieval: synthetic corpus, hybrid search, cited "has it broken before?" answers | Done |
 | 4 | Change awareness: manifest diff and incremental refresh; a tiny second project as the reader quickstart | Done |
-| 5 | Measured experiments on existing evals: HNSW vs exact scan, a second LLM, highlights chosen in code | In progress (5a done) |
+| 5 | Measured experiments on existing evals: HNSW vs exact scan, a second LLM, highlights chosen in code | In progress (5a, 5b done) |
 | 6 | Release: one-command Docker stack, API key and tracing, cheap evals in CI, README, demo, article | Planned |
 
 Phase 1 is built (steps 1 to 8); the history and numbers live in ADRs 0001–0011 and the README, so they aren't repeated here. What to know when coding:
-- Modules: `ingest/` (manifest parser, loader, owner rules), `lineage/` (name resolution, bounded walk), `llm/` (provider interface, OpenAI-compatible adapter, `ScriptedProvider` for tests), `embed/` (embedding interface, OpenAI-compatible adapter, `HashingEmbedder` for tests; ADR 0012), `corpus/` (synthetic document format, checks, scaffold; ADR 0014), `incidents/` (incident chunks, name detection, index; ADR 0015), `diff/` (manifest diff, text/JSON report; ADR 0017), `answer/` (facts, grounding, `generate_checked`, parse checks), `api/` (flow, ask, threads, models, info), `eval/` (truth, conformance, golden set, score, run, highlights), `web/index.html` (static page, no `innerHTML`, no JS tests; checked by hand).
+- Modules: `ingest/` (manifest parser, loader, owner rules), `lineage/` (name resolution, bounded walk), `llm/` (provider interface, OpenAI-compatible adapter, `ScriptedProvider` for tests; parse and history only), `embed/` (embedding interface, OpenAI-compatible adapter, `HashingEmbedder` for tests; ADR 0012), `corpus/` (synthetic document format, checks, scaffold; ADR 0014), `incidents/` (incident chunks, name detection, index; ADR 0015), `diff/` (manifest diff, text/JSON report; ADR 0017), `answer/` (facts, template summary, code highlights, `generate_checked`, parse checks, history), `api/` (flow, ask, threads, models, info), `eval/` (truth, conformance, golden set, score, run, highlights), `web/index.html` (static page, no `innerHTML`, no JS tests; checked by hand).
 - openai 3.x runs on `httpx2`, so adapter tests mock with `httpx2.MockTransport`.
 - `/api/ask` threads use `PostgresSaver`; every type stored in flow state must be in `STATE_TYPES` (`api/flow.py`). `LineageResponse.edges` is required and the eval checks it against the manifest.
-- Eval baseline on Cal-ITP: conformance 8,650 walks, 0 mismatches; qwen2.5:7b final run 55 correct, 1 acceptable, 0 wrong of 56. Highlights are true but chosen worse than random; choosing them in code is a Phase 5 experiment.
+- Eval baseline on Cal-ITP: conformance 8,650 walks, 0 mismatches; qwen2.5:7b final run 55 correct, 1 acceptable, 0 wrong of 56. LLM highlights were true but followed their own selection rule in 3 of 17 answers; code chooses and writes them now (5b, ADR 0019).
 - Open items: replace the clone URL placeholder in `README.md` and add `docs/images/web-ui.png`. The README roadmap and ADR table stop at Phase 1 / ADR 0011; the Phase 6 README rewrite covers them.
 
 Phase 2 steps:
@@ -124,8 +124,8 @@ Phases 4–6 (slim; cut items are argued in ADRs, not built):
 - 4 (ADR 0017) — done. `diff/compare.py` (pure; fields split data vs docs only; unbounded multi-source BFS from data changes; `via`; exact-SQL rename hint), `diff/report.py`, `asklineage diff [--owners] [--json] [--limit] [--exit-code]`. Cal-ITP over 30 model commits: 57 changed (41 data, 16 docs only), 185 downstream across 5 teams, 0 renames found. Refresh = `load-manifest` → `embed` → `load-docs` (no code needed): 235 of 2,799 chunks re-embedded in 5.8 s vs 62 s. `examples/shop/` (9 models, owners from dbt meta and a group, dbt-duckdb 1.11.1 profile in `tools/dbt`), `tests/test_shop_example.py`; `SEARCH_PREFERRED_PATHS` default adds `models/marts/*`. Cut: deploy webhooks, a Snowflake project
 - 5 three experiments, each one table in an ADR, each on an eval that already exists: pgvector HNSW vs exact scan (recall@k and latency on the search and incident sets); a hosted model vs qwen2.5:7b on the golden set; highlights chosen in code vs by the LLM (existing highlight eval). Cut: Pinecone (argued, not run), column-level lineage (named as a limitation; needs compiled SQL, which `dbt parse` doesn't give)
   - 5a (ADR 0018) — done. The old `DISTINCT ON` vector query could never use an index; `search/scan.py` adds `SEARCH_VECTOR_SCAN` = exact | topn (nearest `k x SEARCH_OVERFETCH` chunks, index scans off) | hnsw (same SQL, index forced; `SEARCH_HNSW_EF_SEARCH=100`); settings scoped per query in a savepoint. HNSW indexes on both chunk tables in `schema.sql`. Evals take `--scan`/`--overfetch`, time SQL only (`WarmEmbedder`). `eval vector-scale` pads a scratch copy of the chunks (noise per copy) and reports exact vs HNSW latency, strict and tie-aware recall per `ef_search`. Cal-ITP: every scan matches exact on every metric; topn p95 8.0 vs exact 16.7 ms. Scale: exact p95 46 ms at 30k, 88 at 100k; HNSW 1–5 ms; recall at 100k, ef 100: 0.978 (noise 1.0) but ~0.27 with near-duplicates (noise 0.3). Default topn; switch to hnsw near 10k chunks after running the bench on your data. Planner picks HNSW itself from 30k, so it is never left to choose
-  - 5b next: highlights chosen in code vs by the LLM. The usefulness proxy is computed in code, so a code picker tuned to it wins by construction; compare LLM picks + LLM text, code picks + LLM text, code picks + template, and decide on false-relation rate, retries and latency
-  - 5c last: second LLM on the golden set (qwen2.5:7b is at 59/60, so compare citation pass rate, retries, latency, cost); hosted provider not chosen yet
+  - 5b (ADR 0019) — done, argued, not run: the selection rule was fully written in the prompt and the check left the sentence nothing beyond (upstream, downstream, hops), so `answer/highlights.py` applies the rule and a template writes the sentence. Removed: highlight prompt, `grounding.py`, highlight eval, `highlight_status`, `LLM_MAX_NAMED_NODES`, named-node list, `--summarize -v`. Lineage answers make no LLM call (was p50 4.5 s per answer)
+  - 5c last: second LLM on the golden set (qwen2.5:7b is at 59/60; now only parse and history use the LLM, so compare intent accuracy, history citation pass rate, retries, latency, cost); hosted provider not chosen yet
 - 6 `docker compose up` runs app + Postgres (+ optional Ollama) from a clean clone; an API-key dependency on `/api/*` to show the pattern; OpenTelemetry spans per flow node and LLM/embedding call (console or Jaeger in compose); CI runs conformance and the retrieval evals with `HashingEmbedder` (no LLM); README quickstart, demo video, launch post and article from the ADRs. Cut: real auth, cloud deployment, bigger golden set, hand labels, LLM-as-judge
 
 ## Evaluation approach
@@ -134,7 +134,7 @@ Each layer has one eval, and each eval guards a promise or decides a choice:
 - Lineage: exhaustive conformance against an independent BFS; must be 100% (a miss is a bug).
 - Parse/intent and name resolution: the golden set (regression; small additions only).
 - Search and incident retrieval: hand-written questions, hit@k and MRR, compared across configs; the cutoff table says whether abstaining is possible.
-- Answers: grounding is enforced in code at runtime (checked highlights, cited sentences), so it needs no judge model. The golden run counts correct, acceptable and wrong.
+- Answers: lineage answers are computed, so there is nothing to ground; history sentences are checked in code at runtime (citations, names, numbers), so no judge model is needed. The golden run counts correct, acceptable and wrong.
 No LLM-as-judge and no hand-labelled answer set in this build; the ADRs say why.
 
 ## Decision records
@@ -145,7 +145,7 @@ No LLM-as-judge and no hand-labelled answer set in this build; the ADRs say why.
 - `0004` Name resolution returns candidates; a fuzzy match never answers
 - `0005` Bounded traversal: depth cap + per-level dedup, not path tracking
 - `0006` Narrow LLM provider interface; OpenAI-compatible first; `none` by default
-- `0007` Code writes the lineage facts; the LLM adds checked relation highlights; generic retry loop
+- `0007` Code writes the lineage facts; the LLM adds checked relation highlights; generic retry loop (highlights superseded by 0019)
 - `0008` LangGraph orchestrates `/api/ask` (for 6b checkpoints and Phase 3 loops, and to learn it); plain functions would do for 6a
 - `0009` Conversation threads: opt-in, server-issued IDs, Postgres checkpoints, turn-scoped state reset, `interrupt()` clarifications, follow-ups, locks and pruning
 - `0010` Eval v1: exhaustive lineage conformance against an independent stdlib BFS over `depends_on`; synthetic manifest in CI; question set per layer (7b–7d)
@@ -157,3 +157,4 @@ No LLM-as-judge and no hand-labelled answer set in this build; the ADRs say why.
 - `0016` History answers: code lists incidents, the LLM summarises with citations and node names checked in code; `answered: false` for abstention
 - `0017` Change awareness: in-memory manifest diff, data vs docs-only changes, refresh as three documented commands, a hand-written quickstart project
 - `0018` Vector scan: nearest-chunks query without an index by default (topn), HNSW past ~10k chunks with ef_search 100, never left to the planner; near-duplicates are HNSW's risk
+- `0019` Highlights chosen by a code rule and written from a template; lineage answers need no LLM

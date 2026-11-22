@@ -31,7 +31,7 @@ from psycopg.rows import dict_row
 
 from asklineage.answer.facts import OWNER_SOURCE_MEANING
 from asklineage.answer.history import Retrieved, answer_history
-from asklineage.answer.lineage_answer import HighlightStatus, answer_lineage
+from asklineage.answer.lineage_answer import answer_lineage
 from asklineage.answer.parse import (
     Intent,
     PreviousQuestion,
@@ -73,7 +73,6 @@ from asklineage.lineage.resolve import (
     Candidate,
     NotFound,
     Resolved,
-    node_display_names,
     node_names,
     resolve_node,
 )
@@ -123,7 +122,6 @@ class SearchOptions:
 class AskContext:
     conn: psycopg.Connection
     provider: LLMProvider | None
-    max_named: int
     resumable: bool = False  # true only on a checkpointed thread, where interrupt() can work
     search: SearchOptions = SearchOptions()
 
@@ -179,7 +177,6 @@ STATE_TYPES: tuple[type, ...] = (
     Lineage,
     LineageNode,
     Direction,
-    HighlightStatus,
     AttemptInfo,
     LineageResponse,
     ClarificationResponse,
@@ -360,12 +357,8 @@ def walk(state: AskState, runtime: Runtime[AskContext]) -> AskState:
 
 
 def answer(state: AskState, runtime: Runtime[AskContext]) -> AskState:
-    context, root, query = runtime.context, state["root"], state["query"]
-    # Only the highlight check uses every node name; skip the query when there's no LLM.
-    known = node_display_names(context.conn, state["request"].project) if context.provider else ()
-    lineage_answer = answer_lineage(
-        state["result"], root, context.provider, max_named=context.max_named, known_names=known
-    )
+    root, query = state["root"], state["query"]
+    lineage_answer = answer_lineage(state["result"], root)
     highlights = [
         HighlightInfo(text=text, upstream=c.upstream, downstream=c.downstream, hops=c.hops)
         for c, text in zip(lineage_answer.highlights, lineage_answer.highlight_texts, strict=True)
@@ -377,14 +370,11 @@ def answer(state: AskState, runtime: Runtime[AskContext]) -> AskState:
         summary=lineage_answer.summary,
         facts=FactsInfo.from_facts(lineage_answer.facts),
         highlights=highlights,
-        highlight_status=lineage_answer.status,
         table=[NodeRow.from_node(node) for node in lineage_answer.lineage.nodes],
         edges=[EdgeInfo(parent_id=p, child_id=c) for p, c in lineage_answer.lineage.edges],
     )
-    attempts = [AttemptInfo.from_attempt("highlights", a) for a in lineage_answer.attempts]
     return {
         "response": response,
-        "attempts": attempts,
         "previous": Remembered(root, query.direction, query.depth),
         # The response already holds the table and edges; don't checkpoint the whole walk as well.
         "result": None,
@@ -592,15 +582,12 @@ def run_ask(
     provider: LLMProvider | None,
     request: AskRequest,
     *,
-    max_named: int,
     graph: CompiledStateGraph = ASK_GRAPH,
     thread_id: UUID | None = None,
     search_options: SearchOptions = SearchOptions(),
 ) -> AskResponse:
     """Stateless unless thread_id is given, in which case graph must have a checkpointer."""
-    context = AskContext(
-        conn, provider, max_named, resumable=thread_id is not None, search=search_options
-    )
+    context = AskContext(conn, provider, resumable=thread_id is not None, search=search_options)
     if thread_id is None:
         final = graph.invoke(
             {"request": request}, context=context, config={"recursion_limit": RECURSION_LIMIT}

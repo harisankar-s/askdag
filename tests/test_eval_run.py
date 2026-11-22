@@ -29,7 +29,7 @@ def context(conn: psycopg.Connection) -> EvalContext:
     load_manifest(conn, parse_manifest(manifest))
     graph = truth_graph(manifest)
     owners = loaded_owners(conn, graph.project_name)
-    return EvalContext(conn, None, graph, NameIndex(manifest, graph), owners, max_named=20)
+    return EvalContext(conn, None, graph, NameIndex(manifest, graph), owners)
 
 
 @pytest.fixture
@@ -63,7 +63,7 @@ def score(context: EvalContext, golden: GoldenSet, item_id: str, turn: int, resp
 
 def hub_answer(context: EvalContext):
     request = AskRequest(node="int_hub", project="synthetic")
-    return run_ask(context.conn, None, request, max_named=20)
+    return run_ask(context.conn, None, request)
 
 
 def test_without_an_llm_every_structured_turn_is_right(scores: list[TurnScore]) -> None:
@@ -140,9 +140,7 @@ def test_non_answers_are_safe_wrong_acceptable_or_silent(
 def test_a_run_writes_its_files_and_report(
     tmp_path: Path, golden: GoldenSet, scores: list[TurnScore]
 ) -> None:
-    info = run_info(
-        Path("synthetic.json"), b"{}", golden, llm_provider="none", llm_model=None, max_named=20
-    )
+    info = run_info(Path("synthetic.json"), b"{}", golden, llm_provider="none", llm_model=None)
     summary = summarize(scores, llm=False)
     report = render(info, golden, summary, scores)
     assert golden.sha in report and "## Without an LLM" in report

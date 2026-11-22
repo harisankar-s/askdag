@@ -1,7 +1,6 @@
 import pytest
 from ask_examples import (
     EDGES,
-    HIGHLIGHTS,
     NODES,
     NOT_LINEAGE,
     ORDERS,
@@ -13,7 +12,6 @@ from ask_examples import (
 )
 from helpers import TEST_PROJECT
 
-from asklineage.answer.lineage_answer import HighlightStatus
 from asklineage.api.flow import SearchOptions, run_ask
 from asklineage.api.models import (
     AbstainResponse,
@@ -36,7 +34,14 @@ def graph(load_graph) -> None:
 
 
 def ask(conn, provider=None, **fields):
-    return run_ask(conn, provider, AskRequest(project=TEST_PROJECT, **fields), max_named=20)
+    return run_ask(conn, provider, AskRequest(project=TEST_PROJECT, **fields))
+
+
+# mart_weekly has no owner, so the rule names it first, then the direct node.
+HIGHLIGHT_TEXTS = [
+    "`mart_weekly` (no owner recorded) depends on `stg_orders` through other nodes.",
+    "`fct_orders` (finance) reads directly from `stg_orders`.",
+]
 
 
 def stages(response) -> list[str]:
@@ -52,7 +57,7 @@ def test_structured_fields_answer_without_an_llm(conn):
     assert [row.display_name for row in response.table] == ["fct_orders", "mart_weekly"]
     assert response.summary.startswith("2 nodes depend on `stg_orders`")
     assert response.facts.total == 2
-    assert response.highlight_status is HighlightStatus.OFF
+    assert [h.text for h in response.highlights] == HIGHLIGHT_TEXTS
     assert response.attempts == []
 
 
@@ -64,26 +69,25 @@ def test_structured_depth_and_direction_are_used_and_truncation_reported(conn):
 
 
 def test_a_free_text_question_is_parsed_resolved_and_answered(conn):
-    provider = ScriptedProvider([PARSE, HIGHLIGHTS])
+    provider = ScriptedProvider([PARSE])
 
     response = ask(conn, provider, question=QUESTION)
 
     assert isinstance(response, LineageResponse)
     assert response.node.unique_id == STG_ORDERS.unique_id
-    assert response.highlight_status is HighlightStatus.PASSED
-    assert response.highlights[0].text == "`fct_orders` (finance) reads directly from `stg_orders`."
-    assert stages(response) == ["parse", "highlights"]
+    assert [h.text for h in response.highlights] == HIGHLIGHT_TEXTS
+    assert stages(response) == ["parse"]
+    assert len(provider.calls) == 1
 
 
 def test_parsed_direction_and_depth_are_used(conn):
     parse = {**PARSE, "entity": "fct_orders", "direction": "upstream", "depth": 1}
-    provider = ScriptedProvider([parse, LLMError("down")])
+    provider = ScriptedProvider([parse])
 
     response = ask(conn, provider, question="What feeds fct_orders, one level up?")
 
     assert (response.direction, response.depth) == (Direction.UPSTREAM, 1)
     assert [row.display_name for row in response.table] == ["stg_orders"]
-    assert response.highlight_status is HighlightStatus.REJECTED
 
 
 def test_an_out_of_scope_question_abstains(conn):
@@ -151,7 +155,7 @@ def test_a_question_that_fails_the_check_twice_abstains(conn):
 
 def test_a_name_the_model_changed_is_taken_from_the_question(conn):
     guessed = {**PARSE, "entity": "fct_orders"}
-    provider = ScriptedProvider([guessed, guessed, LLMError("down")])
+    provider = ScriptedProvider([guessed, guessed])
 
     response = ask(conn, provider, question=QUESTION)
 
@@ -221,7 +225,6 @@ def test_a_search_question_ranks_by_meaning_and_flags_weak_matches(conn):
         conn,
         ScriptedProvider([search_reply()]),
         AskRequest(project=TEST_PROJECT, question="weekly mart"),
-        max_named=20,
         search_options=options,
     )
 

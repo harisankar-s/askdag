@@ -65,31 +65,6 @@ def _count(flags: Iterable[bool | None]) -> Share:
     return sum(present), len(present)
 
 
-def _highlight_summary(lineage: Sequence[TurnScore]) -> dict:
-    scored = [s.highlights for s in lineage if s.highlights]
-    attempted = [h for h in scored if h.attempted]
-    rules = Counter(rule for h in attempted for rule in h.first_rules)
-    grounding = {
-        "answers": len(scored),
-        "first_attempt_passed": _count(not h.first_rules for h in attempted),
-        "first_attempt_hallucinated": _count(h.hallucinated_first for h in attempted),
-        "first_attempt_rules": dict(rules.most_common()),
-        "claims": sum(h.claims for h in scored),
-        "manifest_false": sum(h.manifest_false for h in scored),
-    }
-    usefulness = {}
-    for who in ("llm", "code", "random"):
-        chosen = [getattr(h, who) for h in scored if getattr(h, who)]
-        usefulness[who] = {
-            "answers": len(chosen),
-            "minority_hit": _count(p.minority_hit for p in chosen),
-            "coverage_mean": _mean(p.coverage for p in chosen),
-            "alphabetical_bias_mean": _mean(p.alphabetical_bias for p in chosen),
-            "indirect_reach": _count(p.indirect_reach for p in chosen),
-        }
-    return {"highlight_grounding": grounding, "usefulness": usefulness}
-
-
 def summarize(scores: Sequence[TurnScore], llm: bool) -> dict:
     scored = [s for s in scores if s.outcome != "blocked"]
     lineage = [s for s in scored if s.kind == "lineage"]
@@ -137,11 +112,9 @@ def summarize(scores: Sequence[TurnScore], llm: bool) -> dict:
             "suggested": _share(suggest, lambda s: bool(s.suggestion_rank)),
             "suggestion_ranks": sorted(s.suggestion_rank for s in suggest),
         },
-        "highlight_status": dict(Counter(s.highlight_status for s in lineage)),
-        **_highlight_summary(lineage),
         "seconds_p50": _percentile([s.seconds for s in scored], 0.5),
         "seconds_p95": _percentile([s.seconds for s in scored], 0.95),
-        "cost": {stage: _stage_cost(scored, stage) for stage in ("parse", "highlights")},
+        "cost": {stage: _stage_cost(scored, stage) for stage in ("parse", "history")},
     }
     if not llm:
         summary["llm_off"] = _share(
@@ -217,63 +190,6 @@ def _got(score: TurnScore) -> str:
     return f"{score.kind} {score.reason}"
 
 
-def _render_highlights(summary: dict) -> list[str]:
-    statuses = ", ".join(f"{k}: {v}" for k, v in sorted(summary["highlight_status"].items()))
-    lines = ["", "## Highlights", "", f"Status: {statuses or 'none'}"]
-    grounding = summary["highlight_grounding"]
-    if not grounding["answers"]:
-        lines.append("\nNo highlights were generated.")
-        return lines
-    lines.append("")
-    lines += _table(
-        ("check", "result"),
-        [
-            ("first attempt passed the check", fmt(grounding["first_attempt_passed"])),
-            (
-                "first attempt stated a false relation",
-                fmt(grounding["first_attempt_hallucinated"]),
-            ),
-            (
-                "passed highlights the manifest contradicts",
-                f"{grounding['manifest_false']} of {grounding['claims']}",
-            ),
-        ],
-    )
-    rules = grounding["first_attempt_rules"]
-    lines.append(
-        f"\nRules broken on first attempts: {', '.join(f'{k}: {v}' for k, v in rules.items())}"
-        if rules
-        else "\nNo rules broken on first attempts."
-    )
-
-    usefulness = summary["usefulness"]
-    llm, code, rand = usefulness["llm"], usefulness["code"], usefulness["random"]
-    lines += [
-        "",
-        "### Usefulness",
-        "",
-        f"Answers with passed highlights: {llm['answers']}. Baselines pick as many nodes as "
-        "the LLM did: the first named nodes the LLM was shown, and a seeded random pick.",
-        "",
-    ]
-    lines += _table(
-        ("measure", "LLM", "code baseline", "random baseline"),
-        [
-            (
-                "a node outside the majority team",
-                *(fmt(u["minority_hit"]) for u in (llm, code, rand)),
-            ),
-            ("team coverage, mean", *(u["coverage_mean"] for u in (llm, code, rand))),
-            (
-                "alphabetically first direct nodes, mean (lower is better)",
-                *(u["alphabetical_bias_mean"] for u in (llm, code, rand)),
-            ),
-            ("reaches past one hop", *(fmt(u["indirect_reach"]) for u in (llm, code, rand))),
-        ],
-    )
-    return lines
-
-
 def render(info: RunInfo, golden: GoldenSet, summary: dict, scores: Sequence[TurnScore]) -> str:
     model = info.llm_model or "no LLM"
     run_rows = [
@@ -282,7 +198,7 @@ def render(info: RunInfo, golden: GoldenSet, summary: dict, scores: Sequence[Tur
         ("manifest sha256", f"`{info.manifest_sha256[:16]}`"),
         ("source commit", f"`{info.source_commit}`" if info.source_commit else "not recorded"),
         ("asklineage commit", f"`{info.asklineage_commit}`"),
-        ("LLM", f"{info.llm_provider}, {model}, max named nodes {info.max_named}"),
+        ("LLM", f"{info.llm_provider}, {model}"),
         ("prompt shas", ", ".join(f"{k} `{v}`" for k, v in info.prompt_shas.items())),
     ]
     lines = [f"# asklineage eval: {model}, {info.started_at}", ""]
@@ -377,8 +293,6 @@ def render(info: RunInfo, golden: GoldenSet, summary: dict, scores: Sequence[Tur
                 for value, entry in summary["follow_ups"].items()
             ],
         )
-
-    lines += _render_highlights(summary)
 
     lines += ["", "## Cost", ""]
     cost_rows = [

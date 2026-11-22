@@ -297,8 +297,6 @@ function renderLineage(r) {
   if (r.highlights.length) {
     parts.push(el("ul", {}, ...r.highlights.map((h) =>
       el("li", {}, ...rich(h.text), el("span", { class: "tag" }, h.hops)))));
-  } else if (r.highlight_status === "rejected") {
-    parts.push(el("div", { class: "note" }, "The model's highlights failed the checks and were dropped."));
   }
   if (r.facts.truncated) {
     parts.push(el("div", { class: "note" },

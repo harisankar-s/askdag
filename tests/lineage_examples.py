@@ -1,10 +1,9 @@
-"""Lineage results whose facts (names capped at 3) are exactly the prompt's worked examples."""
+"""Two small lineage results, one per direction, with an unowned node in each."""
 
 from asklineage.lineage.graph import Direction, Lineage, LineageNode
 from asklineage.lineage.resolve import Candidate
 
 EXAMPLE_ROOT = Candidate("model.p.stg_orders", "stg_orders", "model", None, 1.0)
-EXAMPLE_MAX_NAMED = 3
 
 
 def _node(name: str, depth: int, owner: str | None = "finance") -> LineageNode:

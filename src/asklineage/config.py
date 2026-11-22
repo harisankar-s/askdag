@@ -20,8 +20,6 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr = SecretStr("ollama")
     llm_timeout_seconds: float = 60.0
     llm_response_format: ResponseFormat = "json_schema"
-    # How many node names the summary prompt may list; counts always cover every node.
-    llm_max_named_nodes: int = Field(default=20, ge=1, le=500)
 
     embed_provider: Literal["none", "openai_compatible"] = "none"
     embed_base_url: str = "http://localhost:11434/v1"

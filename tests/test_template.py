@@ -1,9 +1,12 @@
 from dataclasses import replace
 
-from asklineage.answer.facts import OWNER_SOURCE_MEANING, OwnerGroup
-from asklineage.answer.prompt import EXAMPLE_FACTS
+from lineage_examples import EXAMPLE_LINEAGE, EXAMPLE_ROOT
+
+from asklineage.answer.facts import OWNER_SOURCE_MEANING, OwnerGroup, build_facts
 from asklineage.answer.template import template_summary
 from asklineage.lineage.graph import Direction
+
+EXAMPLE_FACTS = build_facts(EXAMPLE_LINEAGE, EXAMPLE_ROOT)
 
 PATH_RULES = OWNER_SOURCE_MEANING["owners_file"]
 DBT_META = OWNER_SOURCE_MEANING["dbt_meta"]

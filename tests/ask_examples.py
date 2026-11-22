@@ -46,15 +46,3 @@ def owner_reply(entity="stg_orders", *, same_node=False):
         "direction": None,
         "depth": None,
     }
-
-
-HIGHLIGHTS = {
-    "claims": [
-        {
-            "upstream": "stg_orders",
-            "downstream": "fct_orders",
-            "hops": "direct",
-            "text": "`fct_orders` reads directly from `stg_orders`.",
-        }
-    ]
-}

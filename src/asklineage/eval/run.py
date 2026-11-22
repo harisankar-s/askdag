@@ -19,9 +19,9 @@ import psycopg
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 
+from asklineage.answer.history import SYSTEM as history_prompt
 from asklineage.answer.parse import parse_question
 from asklineage.answer.parse import system_prompt as parse_prompt
-from asklineage.answer.prompt import system_prompt as highlights_prompt
 from asklineage.api.flow import (
     ASK_GRAPH,
     SearchOptions,
@@ -34,7 +34,6 @@ from asklineage.api.models import AskRequest
 from asklineage.eval.golden import GoldenItem, GoldenSet, NameIndex, Turn
 from asklineage.eval.score import TurnScore, score_turn
 from asklineage.eval.truth import TruthGraph
-from asklineage.lineage.graph import Direction
 from asklineage.llm.base import LLMProvider
 
 # Not scored: one call so the first scored question doesn't pay for loading the model.
@@ -48,7 +47,6 @@ class EvalContext:
     graph: TruthGraph
     index: NameIndex
     owners: Mapping[str, str | None]
-    max_named: int
     search: SearchOptions = SearchOptions()
 
 
@@ -64,7 +62,6 @@ class RunInfo:
     phrasings: str
     llm_provider: str
     llm_model: str | None
-    max_named: int
     asklineage_commit: str | None
     source_commit: str | None
     prompt_shas: dict[str, str]
@@ -92,8 +89,7 @@ def git_commit(path: Path) -> str | None:
 def prompt_shas() -> dict[str, str]:
     return {
         "parse": _sha(parse_prompt()),
-        "highlights_downstream": _sha(highlights_prompt(Direction.DOWNSTREAM)),
-        "highlights_upstream": _sha(highlights_prompt(Direction.UPSTREAM)),
+        "history": _sha(history_prompt),
     }
 
 
@@ -104,7 +100,6 @@ def run_info(
     *,
     llm_provider: str,
     llm_model: str | None,
-    max_named: int,
     source_repo: Path | None = None,
 ) -> RunInfo:
     return RunInfo(
@@ -118,7 +113,6 @@ def run_info(
         phrasings=golden.phrasings,
         llm_provider=llm_provider,
         llm_model=llm_model,
-        max_named=max_named,
         asklineage_commit=git_commit(Path(__file__).parent),
         source_commit=git_commit(source_repo) if source_repo else None,
         prompt_shas=prompt_shas(),
@@ -145,7 +139,6 @@ def _ask_turn(
         index=context.index,
         owners=context.owners,
         previous_node=previous_node,
-        max_named=context.max_named,
     )
     if "choose" in turn.request and not waiting_for_choice(flow, thread_id):
         return score(None, blocked=True)
@@ -156,7 +149,6 @@ def _ask_turn(
             context.conn,
             context.provider,
             request,
-            max_named=context.max_named,
             graph=flow,
             thread_id=thread_id,
             search_options=context.search,
