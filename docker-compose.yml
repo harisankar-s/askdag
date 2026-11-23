@@ -1,3 +1,19 @@
+x-asklineage: &asklineage
+  build: .
+  image: asklineage:local
+  # Every setting in .env reaches the app; the three below are rewritten because localhost
+  # inside a container is the container. Ollama runs on the host (ADR 0021).
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    DATABASE_URL: postgresql://asklineage:asklineage@postgres:5432/asklineage
+    LLM_BASE_URL: ${DOCKER_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+    EMBED_BASE_URL: ${DOCKER_EMBED_BASE_URL:-http://host.docker.internal:11434/v1}
+    TRACING_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
 services:
   postgres:
     image: pgvector/pgvector:pg17
@@ -14,6 +30,44 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  seed:
+    <<: *asklineage
+    # Every step replaces what it loaded before, so a rerun on every `up` is safe.
+    command:
+      - sh
+      - -ec
+      - |
+        asklineage init-db
+        asklineage load-manifest examples/shop/manifests/manifest.json
+        asklineage embed --project shop
+        asklineage load-docs --dir examples/shop/corpus
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    <<: *asklineage
+    environment:
+      DATABASE_URL: postgresql://asklineage:asklineage@postgres:5432/asklineage
+      LLM_BASE_URL: ${DOCKER_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+      EMBED_BASE_URL: ${DOCKER_EMBED_BASE_URL:-http://host.docker.internal:11434/v1}
+      TRACING_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+      TRACING: ${TRACING:-off}
+    ports:
+      - "8000:8000"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+
+  # TRACING=otlp docker compose --profile tracing up; traces at http://localhost:16686
+  jaeger:
+    image: jaegertracing/jaeger:2.22.0
+    profiles: [tracing]
+    ports:
+      - "16686:16686"
+      - "4318:4318"
 
 volumes:
   pgdata:

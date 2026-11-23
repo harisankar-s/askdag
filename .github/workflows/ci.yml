@@ -33,3 +33,19 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest
+      # The lineage promise on manifests dbt wrote, not only the synthetic one (ADR 0024).
+      - name: Lineage conformance on the shop manifests
+        run: |
+          uv run asklineage init-db
+          for manifest in examples/shop/manifests/manifest.v1.json examples/shop/manifests/manifest.json; do
+            uv run asklineage load-manifest "$manifest"
+            uv run asklineage eval conformance "$manifest"
+          done
+
+  quickstart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/smoke_quickstart.sh
+      - if: always()
+        run: docker compose down -v

@@ -10,6 +10,7 @@ import openai
 from pydantic import BaseModel
 
 from asklineage.llm.base import Completion, LLMError, LLMOutputError, parse_output
+from asklineage.model_span import model_span
 
 # json_schema: the server constrains output to the schema (Ollama, OpenAI, vLLM).
 # json_object: the server only guarantees some JSON. off: the server is sent no format hint.
@@ -55,6 +56,19 @@ class OpenAICompatibleProvider:
         elif self._response_format == "json_object":
             request["response_format"] = {"type": "json_object"}
 
+        with model_span("chat", self.model, self._client) as span:
+            span.set_attribute("asklineage.output_schema", output.__name__)
+            if self._temperature is not None:
+                span.set_attribute("gen_ai.request.temperature", self._temperature)
+            completion = self._complete(request, output)
+            span.set_attribute("gen_ai.response.model", completion.model)
+            if completion.input_tokens is not None:
+                span.set_attribute("gen_ai.usage.input_tokens", completion.input_tokens)
+            if completion.output_tokens is not None:
+                span.set_attribute("gen_ai.usage.output_tokens", completion.output_tokens)
+            return completion
+
+    def _complete[T: BaseModel](self, request: dict[str, Any], output: type[T]) -> Completion[T]:
         server = str(self._client.base_url)
         started = time.perf_counter()
         try:

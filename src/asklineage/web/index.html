@@ -132,7 +132,7 @@ pre { white-space: pre-wrap; word-break: break-word; margin: 2px 0; font-size: 0
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const state = { threadId: null, lastBody: null, busy: false };
+const state = { threadId: null, lastBody: null, busy: false, apiKey: null };
 
 function el(tag, props, ...children) {
   const node = document.createElement(tag);
@@ -259,9 +259,36 @@ function rich(text) {
 
 function show(text) { return text === null || text === undefined ? "–" : String(text); }
 
+// The key lives in this tab only and is asked for once, on the first 401 (ADR 0022).
+function storedKey() {
+  try { return sessionStorage.getItem("asklineage-key") || state.apiKey; } catch (_) { return state.apiKey; }
+}
+
+function storeKey(key) {
+  state.apiKey = key;
+  try { sessionStorage.setItem("asklineage-key", key); } catch (_) { /* memory only */ }
+}
+
+async function apiFetch(url, options = {}) {
+  const call = () => {
+    const key = storedKey();
+    const headers = { ...(options.headers || {}), ...(key ? { "X-API-Key": key } : {}) };
+    return fetch(url, { ...options, headers });
+  };
+  let res = await call();
+  if (res.status === 401) {
+    const key = window.prompt("This server needs an API key (X-API-Key):");
+    if (key) {
+      storeKey(key.trim());
+      res = await call();
+    }
+  }
+  return res;
+}
+
 async function loadInfo() {
   try {
-    const res = await fetch("/api/info");
+    const res = await apiFetch("/api/info");
     if (!res.ok) throw new Error("HTTP " + res.status);
     const info = await res.json();
     const projects = info.projects.length ? info.projects.join(", ") : "none loaded";
@@ -284,7 +311,7 @@ function errorMessage(status, body) {
   } else {
     text = typeof detail === "string" ? detail : "Unexpected error.";
   }
-  const label = { 404: "Thread not found", 409: "Conflict", 422: "Invalid request" }[status];
+  const label = { 401: "API key needed", 404: "Thread not found", 409: "Conflict", 422: "Invalid request" }[status];
   return (label || "HTTP " + status) + ": " + text;
 }
 
@@ -414,7 +441,7 @@ async function send(body, label) {
       else sent.start_thread = true;
     }
     state.lastBody = body;
-    const res = await fetch("/api/ask", {
+    const res = await apiFetch("/api/ask", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(sent),

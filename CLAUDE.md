@@ -33,7 +33,10 @@ The author is a data engineering architect building this to learn enterprise RAG
 ## Common commands
 
 ```bash
-docker compose up -d
+docker compose up -d postgres
+docker compose up --build
+TRACING=otlp docker compose --profile tracing up --build -d
+scripts/smoke_quickstart.sh
 uv run ruff format . && uv run ruff check . && uv run pytest
 uv run asklineage init-db
 uv run asklineage load-manifest data/manifests/calitp/manifest.json --owners config/owners.calitp.yml
@@ -127,6 +130,10 @@ Phases 4–6 (slim; cut items are argued in ADRs, not built):
   - 5a (ADR 0018) — done. The old `DISTINCT ON` vector query could never use an index; `search/scan.py` adds `SEARCH_VECTOR_SCAN` = exact | topn (nearest `k x SEARCH_OVERFETCH` chunks, index scans off) | hnsw (same SQL, index forced; `SEARCH_HNSW_EF_SEARCH=100`); settings scoped per query in a savepoint. HNSW indexes on both chunk tables in `schema.sql`. Evals take `--scan`/`--overfetch`, time SQL only (`WarmEmbedder`). `eval vector-scale` pads a scratch copy of the chunks (noise per copy) and reports exact vs HNSW latency, strict and tie-aware recall per `ef_search`. Cal-ITP: every scan matches exact on every metric; topn p95 8.0 vs exact 16.7 ms. Scale: exact p95 46 ms at 30k, 88 at 100k; HNSW 1–5 ms; recall at 100k, ef 100: 0.978 (noise 1.0) but ~0.27 with near-duplicates (noise 0.3). Default topn; switch to hnsw near 10k chunks after running the bench on your data. Planner picks HNSW itself from 30k, so it is never left to choose
   - 5b (ADR 0019) — done, argued, not run: the selection rule was fully written in the prompt and the check left the sentence nothing beyond (upstream, downstream, hops), so `answer/highlights.py` applies the rule and a template writes the sentence. Removed: highlight prompt, `grounding.py`, highlight eval, `highlight_status`, `LLM_MAX_NAMED_NODES`, named-node list, `--summarize -v`. Lineage answers make no LLM call (was p50 4.5 s per answer)
   - 5c (ADR 0020) — done. Claude Haiku 5.5 through the existing adapter (`LLM_BASE_URL=https://api.anthropic.com/v1/`, `LLM_RESPONSE_FORMAT=off` since the endpoint only takes strict schemas, new `LLM_TEMPERATURE=null` since it rejects temperature). Golden 63 turns: qwen 61/1/1 (one follow-up direction flip, right in the two earlier runs), Haiku 62/1/0; parse retries 4 vs 1; parse p50 683 vs 712 ms; wall p50 0.67 vs 0.71 s. qwen stays default (no key, local, within noise). Then `keep_previous_direction` (parse.py): a lineage follow-up with no direction cue word keeps the previous direction, whatever the model said. After 5b, wall time per turn fell from p50 3.9 s to 0.67 s
+- 6a (ADR 0021) `Dockerfile` (two-stage uv, non-root), allow-list `.dockerignore`, compose `seed` (init-db, load shop, embed, load-docs) + `app`; `DOCKER_LLM_BASE_URL`/`DOCKER_EMBED_BASE_URL` default to host Ollama; in-compose Ollama cut — done; image 393 MB, seed 3.4 s, 10 of 13 shop questions right (3 LLM misses in history and out-of-scope)
+- 6b (ADR 0022) `API_KEY` setting, `api/auth.py` dependency on both `/api/*` routers, page asks once and keeps the key in `sessionStorage` — built, awaiting review
+- 6c (ADR 0023) `tracing.py` (`TRACING` off|console|otlp, FastAPI instrumentation, `traced_node` per flow node), `model_span.py` (GenAI-convention client spans in both adapters); no text in spans; Jaeger 2.22 under compose profile `tracing`. History answer 6.4 s: 99.5% in the two LLM calls — built, awaiting review
+- 6d (ADR 0024) CI `test` job adds conformance on both shop manifests via the CLI (250 walks, 0 mismatches); new `quickstart` job runs `scripts/smoke_quickstart.sh` (compose up from clean checkout, wait for ready, one lineage answer checked); retrieval evals and the LLM stay out of CI (no question set for shop; hashing scores decide nothing) — built, local run passes, first GitHub run pending
 - 6 `docker compose up` runs app + Postgres (+ optional Ollama) from a clean clone; an API-key dependency on `/api/*` to show the pattern; OpenTelemetry spans per flow node and LLM/embedding call (console or Jaeger in compose); CI runs conformance and the retrieval evals with `HashingEmbedder` (no LLM); README quickstart, demo video, launch post and article from the ADRs. Cut: real auth, cloud deployment, bigger golden set, hand labels, LLM-as-judge
 
 ## Evaluation approach
@@ -160,3 +167,7 @@ No LLM-as-judge and no hand-labelled answer set in this build; the ADRs say why.
 - `0018` Vector scan: nearest-chunks query without an index by default (topn), HNSW past ~10k chunks with ef_search 100, never left to the planner; near-duplicates are HNSW's risk
 - `0019` Highlights chosen by a code rule and written from a template; lineage answers need no LLM
 - `0020` Second LLM: Claude Haiku 5.5 via the OpenAI-compatible endpoint matches qwen2.5:7b within noise; local stays default
+- `0021` Docker stack: app + one-shot seed job (shop example) in compose; one image; `.env` passed through with container base URLs; Ollama on the host
+- `0022` One shared API key on `/api/*` (`X-API-Key`, constant-time compare, ≥16 chars), off by default; health and page open; real auth is a proxy's job
+- `0023` Tracing: OpenTelemetry spans per request, flow node and model call (GenAI conventions); no question or prompt text in spans; off by default; Jaeger as a compose profile
+- `0024` CI evals: conformance on dbt-written shop manifests and a quickstart smoke test; retrieval evals and the LLM stay local

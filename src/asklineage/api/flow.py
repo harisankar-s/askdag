@@ -80,6 +80,7 @@ from asklineage.lineage.resolve import (
 from asklineage.llm.base import LLMProvider
 from asklineage.search.query import search
 from asklineage.search.scan import Scan
+from asklineage.tracing import traced_node, tracer
 
 HISTORY_INCIDENTS = 3
 HISTORY_SECTIONS = ("Summary", "Root cause", "Fix")
@@ -532,17 +533,17 @@ def recall(state: AskState, runtime: Runtime[AskContext]) -> AskState:
 
 def build_graph(checkpointer: BaseCheckpointSaver | None = None) -> CompiledStateGraph:
     graph = StateGraph(AskState, context_schema=AskContext)
-    graph.add_node("begin", begin)
-    graph.add_node("read_fields", read_fields)
-    graph.add_node("parse", parse)
-    graph.add_node("abstain", abstain)
-    graph.add_node("resolve", resolve)
-    graph.add_node("clarify", clarify)
-    graph.add_node("lineage", walk)
-    graph.add_node("answer", answer)
-    graph.add_node("owner", owner)
-    graph.add_node("search", find)
-    graph.add_node("history", recall)
+    graph.add_node("begin", traced_node("begin", begin))
+    graph.add_node("read_fields", traced_node("read_fields", read_fields))
+    graph.add_node("parse", traced_node("parse", parse))
+    graph.add_node("abstain", traced_node("abstain", abstain))
+    graph.add_node("resolve", traced_node("resolve", resolve))
+    graph.add_node("clarify", traced_node("clarify", clarify))
+    graph.add_node("lineage", traced_node("lineage", walk))
+    graph.add_node("answer", traced_node("answer", answer))
+    graph.add_node("owner", traced_node("owner", owner))
+    graph.add_node("search", traced_node("search", find))
+    graph.add_node("history", traced_node("history", recall))
 
     graph.add_edge(START, "begin")
     graph.add_conditional_edges("begin", route_input, ["read_fields", "parse"])
@@ -590,6 +591,31 @@ def run_ask(
     search_options: SearchOptions = SearchOptions(),
 ) -> AskResponse:
     """Stateless unless thread_id is given, in which case graph must have a checkpointer."""
+    with tracer.start_as_current_span("ask") as span:
+        span.set_attribute("asklineage.threaded", thread_id is not None)
+        span.set_attribute("asklineage.input", _input_kind(request))
+        if request.project:
+            span.set_attribute("asklineage.project", request.project)
+        response = _run(conn, provider, request, graph, thread_id, search_options)
+        span.set_attribute("asklineage.kind", response.kind)
+        span.set_attribute("asklineage.llm_attempts", len(response.attempts))
+        return response
+
+
+def _input_kind(request: AskRequest) -> str:
+    if request.choose:
+        return "choose"
+    return "question" if request.question else "node"
+
+
+def _run(
+    conn: psycopg.Connection,
+    provider: LLMProvider | None,
+    request: AskRequest,
+    graph: CompiledStateGraph,
+    thread_id: UUID | None,
+    search_options: SearchOptions,
+) -> AskResponse:
     context = AskContext(conn, provider, resumable=thread_id is not None, search=search_options)
     if thread_id is None:
         final = graph.invoke(

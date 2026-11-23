@@ -1,11 +1,13 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from asklineage.llm.openai_compatible import ResponseFormat
 from asklineage.search.scan import Scan
+
+MIN_API_KEY_LENGTH = 16
 
 
 class Settings(BaseSettings):
@@ -13,6 +15,13 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_parse_none_str="null")
 
     database_url: str = "postgresql://asklineage:asklineage@localhost:5432/asklineage"
+
+    # Unset: /api/* is open, as on a laptop. Set: every /api/* request must send it in X-API-Key.
+    api_key: SecretStr | None = None
+
+    # off | console (spans printed by the server) | otlp (sent to a collector such as Jaeger).
+    tracing: Literal["off", "console", "otlp"] = "off"
+    tracing_otlp_endpoint: str = "http://localhost:4318/v1/traces"
 
     llm_provider: Literal["none", "openai_compatible"] = "none"
     llm_base_url: str = "http://localhost:11434/v1"
@@ -48,6 +57,14 @@ class Settings(BaseSettings):
     search_overfetch: int = Field(default=4, ge=1, le=50)
     # HNSW's candidate list (ADR 0018: 100 kept recall at 0.98 on 100k padded chunks).
     search_hnsw_ef_search: int = Field(default=100, ge=1, le=1000)
+
+    @field_validator("api_key")
+    @classmethod
+    def _long_enough(cls, key: SecretStr | None) -> SecretStr | None:
+        # An empty API_KEY= must not look like protection; it fails at startup instead.
+        if key is not None and len(key.get_secret_value()) < MIN_API_KEY_LENGTH:
+            raise ValueError(f"API_KEY must be at least {MIN_API_KEY_LENGTH} characters, or unset")
+        return key
 
 
 @lru_cache

@@ -6,6 +6,7 @@ from collections.abc import Sequence
 import openai
 
 from asklineage.embed.base import EmbeddingError, Embeddings, Kind
+from asklineage.model_span import model_span
 
 
 class OpenAICompatibleEmbedder:
@@ -31,6 +32,15 @@ class OpenAICompatibleEmbedder:
             raise ValueError("cannot embed an empty text")
         if not texts:
             return Embeddings([], self.model, None, 0)
+        with model_span("embeddings", self.model, self._client) as span:
+            span.set_attribute("asklineage.embed_kind", kind)
+            span.set_attribute("asklineage.texts", len(texts))
+            result = self._embed(texts, kind)
+            if result.input_tokens is not None:
+                span.set_attribute("gen_ai.usage.input_tokens", result.input_tokens)
+            return result
+
+    def _embed(self, texts: Sequence[str], kind: Kind) -> Embeddings:
         prefix = self._prefixes[kind]
         vectors: list[list[float]] = []
         tokens: int | None = 0

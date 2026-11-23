@@ -12,6 +12,7 @@ def get_pool() -> ConnectionPool:
     if _pool is None:
         _pool = ConnectionPool(
             get_settings().database_url,
+            open=True,
             min_size=1,
             max_size=10,
             kwargs={"row_factory": dict_row},
@@ -25,6 +26,7 @@ def get_checkpoint_pool() -> ConnectionPool:
     if _checkpoint_pool is None:
         _checkpoint_pool = ConnectionPool(
             get_settings().database_url,
+            open=True,
             min_size=1,
             max_size=4,
             kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
